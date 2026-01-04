@@ -2,6 +2,16 @@
 
 Python FastAPI backend for the HyperBookLM application.
 
+## 默认配置
+
+本项目默认使用以下服务：
+
+- **图片生成服务**: Google Image Service (Gemini 2.5 Flash Image)
+- **存储服务**: Supabase Storage
+- **视频生成服务**: FAL AI (Wan-2.1, Veo3.1, SeeDance)
+
+所有配置通过统一的配置文件 `app/config.py` 管理，可通过环境变量自定义。
+
 ## Setup
 
 1. Create a virtual environment:
@@ -21,7 +31,25 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-4. Run the development server:
+**必需配置项**:
+- `GOOGLE_API_KEY`: Google Gemini API 密钥（默认图片服务）
+- `SUPABASE_URL`: Supabase 项目 URL（默认存储服务）
+- `SUPABASE_SERVICE_KEY`: Supabase Service Key
+- `FAL_API_KEY`: FAL AI API 密钥（视频生成服务）
+- `OPENAI_API_KEY`: OpenAI API 密钥（LLM 功能）
+
+**可选配置项**:
+- `DEFAULT_IMAGE_SERVICE`: 图片服务选择 (google/fal)，默认 google
+- `DEFAULT_STORAGE_SERVICE`: 存储服务选择 (supabase/local)，默认 supabase
+- 其他配置项详见 `.env.example`
+
+4. 初始化 Supabase:
+```bash
+# 在 Supabase Dashboard 的 SQL Editor 中执行
+cat supabase_init.sql
+```
+
+5. Run the development server:
 ```bash
 python app/main.py
 ```

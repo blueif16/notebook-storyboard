@@ -1,0 +1,1427 @@
+"""Unboxing Video工具 - 开箱视频分段生成"""
+import os,re,shutil,asyncio,logging,httpx # 加载环境变量，正则表达式，文件操作，异步，日志，HTTP客户端
+from langchain_core.tools import tool # LangChain工具装饰器
+import instructor # Instructor库用于结构化输出
+from openai import AsyncOpenAI # OpenAI异步客户端用于纯文本生成
+from pydantic import BaseModel, Field # Pydantic基础模型
+from typing import List, Optional, Dict, Any # 类型提示
+import sys # 系统路径
+from pathlib import Path # 路径处理
+from datetime import datetime,timezone # 时间处理
+from contextvars import ContextVar # 上下文变量
+from dotenv import load_dotenv # 环境变量加载
+
+load_dotenv() # 加载环境变量
+
+# 视频分段模型
+class Segment(BaseModel):  # 视频分段模型
+    """视频片段分段信息 - 用于分析和生成分段视频"""
+    id: int = Field(..., description="分段ID，自增")
+    plot: str = Field(..., description="该分段的情节描述")
+    first_frame: Optional[str] = Field(
+        None,
+        description="起始帧图片asset_id"
+    )  # 起始帧asset_id
+    end_frame: Optional[str] = Field(
+        None,
+        description="结束帧图片asset_id"
+    )  # 结束帧asset_id
+
+script_writer_prompt = """Role and Context
+You are a professional unboxing video director with 10+ years of experience in product cinematography and e-commerce content creation. Your specialty is crafting engaging product reveal sequences that maximize viewer engagement and highlight product features effectively.
+
+Task Instructions
+Transform product asset data into three-part unboxing video scripts. Each part must be exactly 4 seconds (20-30 words). Analyze all provided asset descriptions to automatically detect if back/rear views exist—if mentioned, use 360 degree rotation in Part 3; if not mentioned, use tactile exploration.
+Include brief product descriptions naturally in the script based on the product category, purpose, materials, and key features. Reference all relevant asset IDs (box, product, accessories) naturally throughout.
+
+Output Format
+Generate three sequential script parts:
+
+PART 1 - BOX PRESENTATION (4 seconds)
+- Position box asset on table center
+- Slowly remove lid/cover
+- Include brief mention of product type/category
+- Reference box ID if provided
+
+PART 2 - PRODUCT EXTRACTION (4 seconds)
+- Use one hand to lift product from packaging
+- Place product at table center
+- Move box aside, but still keep it in the frame, and its shape and appearance should be the same
+- Reference main product ID
+
+PART 3 - PRODUCT SHOWCASE (4 seconds)
+- Only if the back view of product is provided in the assets list, rotate product 360 degrees clockwise, end with back view visible, describe back features
+- IF no back view mentioned: Touch and explore surfaces, demonstrate texture, build quality, functional elements
+- Reference product ID
+
+Writing Style Requirements:
+- Present tense, active voice only
+- Use pacing descriptors: slowly, gently, deliberately, smoothly
+- Each sentence describes visible action or movement, but do not add unnecessary details that you don't know about, only info you can trust is from the provided asset descriptions
+- Asset IDs appear naturally in context with brief description in parentheses on first mention
+- At each plot, also include some description of current setting, what's in the frame and how they are placed
+- Better have the hand wearing gloves everytime and keep it the same, better use only one hand during the full process, also be more specific about the hand's movement and action, from which direction, at the end state of each plot, I don't want hand to be included
+
+Example Output:
+Input assets:
+- 6525c1c8-5adc-4d34-94d6-feb3797ed601: premium red gift box 
+- e8df9364-a5c4-4e55-acc4-7aeab3ef0409: white leather luxury bag, front view studio shot
+
+Output:
+PART 1 - BOX PRESENTATION
+The bx089 (premium black gift box) sits centered on the table, very important to mention the lid is completely closed. Hands gently lift the lid, gradully opening it and revealing ed112 (white leather crossbody bag) beneath. Then withdraw the hand and keep the lid completely open and the bag fully visible. 
+
+PART 2 - PRODUCT EXTRACTION
+Using one hand, lift ed112 by its strap from bx089. Place ed112 at the table center, move bx089 aside with the lid beside the box but keep it in the frame. 
+
+PART 3 - In detail showcase of the product
+Slowly touches the bag and show the details. Slowly move the hand around the bag. Here keep the box and lidin the last frame totally unchanged. 
+"""
+
+def get_instructor_client(): # 延迟初始化instructor客户端
+    api_key=os.getenv("OPENAI_API_KEY")
+    if not api_key:return None
+    return instructor.from_provider("openai/gpt-5", api_key=api_key)
+
+def get_openai_client(): # 延迟初始化OpenAI客户端
+    api_key=os.getenv("OPENAI_API_KEY")
+    if not api_key:return None
+    return AsyncOpenAI(api_key=api_key)
+
+# 配置和初始化
+FAL_API_KEY=os.getenv("FAL_API_KEY")
+SUPABASE_URL=os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY=os.getenv("SUPABASE_SERVICE_KEY") # 使用SERVICE_KEY绕过RLS
+BASE_DIR="generated_campaigns" #本地保存基础目录
+USER_ID="550e8400-e29b-41d4-a716-446655440000" #默认用户ID
+current_user_id: ContextVar[Optional[str]]=ContextVar('current_user_id',default=None) #上下文变量，存储当前请求的user_id
+FFMPEG_BIN=os.getenv("FFMPEG_BIN","ffmpeg") #FFmpeg可执行文件路径
+
+# 验证必需的环境变量
+if not FAL_API_KEY:
+    raise ValueError("❌ FAL_API_KEY environment variable is required but not set")
+
+# 延迟初始化Supabase客户端（使用SERVICE_KEY以绕过RLS策略）
+supabase:Optional[Any]=None
+_supabase_initialized = False
+
+def _init_supabase():
+    global supabase, _supabase_initialized
+    if _supabase_initialized:
+        return supabase
+
+    try:
+        from supabase import create_client,Client
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+            supabase=create_client(SUPABASE_URL,SUPABASE_SERVICE_KEY)
+        _supabase_initialized = True
+    except ImportError:
+        print("⚠️ Supabase not available, some features will be disabled")
+    except Exception as e:
+        print(f"⚠️ Supabase initialization failed: {e}, some features will be disabled")
+
+    return supabase
+
+class VideoSegments(BaseModel): # 视频分段集合
+    """视频分段集合 - 包含多个Segment"""
+    segments: List[Segment] = Field(..., description="视频分段列表")
+
+class FrameImageGeneration(BaseModel): # 帧图片生成模型
+    prompt: str = Field(..., description="Prompt for the current frame's generation")
+    image_asset_id: List[str] = Field(..., description="ref image asset ids, only those needed for the generation of the current frame and is not existing in previous frame")
+
+# 服务函数 - 任务状态更新
+async def update_task_status(task_id:str,status:str,error_message:Optional[str]=None): #更新content_generation_tasks表的任务状态
+    """更新任务状态 - 由后台处理完成后调用
+
+    Args:
+        task_id: 任务UUID
+        status: 'completed' 或 'failed'
+        error_message: 错误信息（status='failed'时必填）
+    """
+    supabase_client = _init_supabase()
+    if not supabase_client:
+        print(f"⚠️  [UPDATE_TASK_STATUS] Supabase未配置，无法更新任务状态")
+        return
+
+    try:
+        now=datetime.now(timezone.utc).isoformat()
+
+        update_data={"status":status,"updated_at":now}
+
+        if status=="completed":
+            update_data["completed_at"]=now
+        elif status=="failed" and error_message:
+            update_data["error_message"]=error_message
+
+        supabase.table("content_generation_tasks").update(update_data).eq("id",task_id).execute()
+        print(f"✅ [UPDATE_TASK_STATUS] 任务 {task_id} 状态更新为 {status}")
+    except Exception as e:
+        print(f"❌ [UPDATE_TASK_STATUS] 更新失败: {e}")
+
+# 服务函数 - FAL API订阅和轮询
+async def fal_subscribe(endpoint:str,args:dict)->dict: #订阅FAL任务并等待结果
+    if not FAL_API_KEY or FAL_API_KEY.strip()=="": #检查FAL_API_KEY是否有效
+        raise ValueError("❌ FAL_API_KEY未设置或为空，请在.env文件中配置FAL_API_KEY")
+    base_url="https://queue.fal.run"
+    headers={"Authorization":f"Key {FAL_API_KEY}","Content-Type":"application/json"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        print(f"📤 [FAL_API] Endpoint: {endpoint}")
+        print(f"📤 [FAL_API] 请求参数: {args}")
+        resp=await client.post(f"{base_url}/{endpoint}",headers=headers,json=args)
+        print(f"📤 [FAL_API] 提交状态码: {resp.status_code}")
+        if resp.status_code!=200:
+            print(f"❌ [FAL_API] 提交失败响应: {resp.text[:500]}")
+            raise RuntimeError(f"FAL提交失败: {resp.status_code}, {resp.text[:200]}")
+        result=resp.json()
+        request_id=result.get("request_id")
+        status_url=result.get("status_url")
+        response_url=result.get("response_url")
+        print(f"✅ [FAL_API] 请求已提交: {request_id}")
+        print(f"📋 [FAL_API] status_url: {status_url}")
+        print(f"📋 [FAL_API] response_url: {response_url}")
+
+        if not status_url:
+            print(f"⚠️  [FAL_API] 响应中无status_url，使用构建的URL")
+            status_url=f"{base_url}/{endpoint}/requests/{request_id}/status"
+
+        poll_count=0
+        for _ in range(150): #轮询结果，最多5分钟
+            poll_count+=1
+            await asyncio.sleep(2)
+            # 使用返回的status_url并添加logs参数
+            poll_url=f"{status_url}?logs=1" if "?" not in status_url else f"{status_url}&logs=1"
+            print(f"🔄 [FAL_API] 第{poll_count}次轮询: {poll_url}")
+            status_resp=await client.get(poll_url,headers=headers)
+            # 202 Accepted 和 200 OK 都是正常状态
+            if status_resp.status_code not in [200,202]:
+                print(f"⚠️  [FAL_API] 第{poll_count}次状态查询失败: HTTP {status_resp.status_code}")
+                print(f"⚠️  [FAL_API] 响应内容: {status_resp.text[:300]}")
+                print(f"⚠️  [FAL_API] 请求URL: {poll_url}")
+                continue
+            status_data=status_resp.json();status=status_data.get("status")
+            queue_pos=status_data.get("queue_position","N/A")
+            print(f"📊 [FAL_API] 第{poll_count}次轮询 - 状态: {status}, 队列位置: {queue_pos}")
+            if status_data.get("logs"):print(f"📝 [FAL_API] 日志: {status_data.get('logs')}")
+            if status=="COMPLETED":
+                # 优先使用response_url，否则构建URL
+                result_url=response_url if response_url else f"{base_url}/{endpoint}/requests/{request_id}"
+                print(f"📥 [FAL_API] 任务完成，获取结果URL: {result_url}")
+                result_resp=await client.get(result_url,headers=headers)
+                print(f"📥 [FAL_API] 结果HTTP状态: {result_resp.status_code}")
+                if result_resp.status_code!=200:
+                    print(f"❌ [FAL_API] 获取结果失败: {result_resp.text[:300]}")
+                    raise RuntimeError(f"获取结果失败: {result_resp.status_code}")
+                full_result=result_resp.json()
+                print(f"📦 [FAL_API] 完整响应keys: {list(full_result.keys()) if isinstance(full_result,dict) else 'N/A'}")
+                print(f"📦 [FAL_API] 原始响应: {str(full_result)[:600]}...")
+                data=full_result.get("data",full_result)
+                print(f"📦 [FAL_API] 提取data字段: {str(data)[:400]}...")
+                return data
+            elif status in ["FAILED","CANCELLED"]:
+                error_msg=status_data.get("error","未知错误")
+                print(f"❌ [FAL_API] 任务{status}: {error_msg}")
+                raise RuntimeError(f"请求{status}: {error_msg}")
+        print(f"⏰ [FAL_API] 超时 - 已轮询{poll_count}次({poll_count*2}秒)")
+        raise TimeoutError(f"请求超时(已等待{poll_count*2}秒)")
+
+# 服务函数 - 确保文件夹结构
+def ensure_folder_structure(campaign_id:str,batch_id:str)->tuple[Path,Path]: #确保文件夹结构存在
+    # Use absolute path relative to mcp-content-gen directory (parent of tools)
+    base=Path(__file__).parent.parent.parent/BASE_DIR
+    campaign_folder=base/campaign_id/batch_id
+    image_folder=campaign_folder/"images";video_folder=campaign_folder/"videos"
+    image_folder.mkdir(parents=True,exist_ok=True);video_folder.mkdir(parents=True,exist_ok=True)
+    return image_folder,video_folder
+
+# 服务函数 - 保存caption到batch文件夹
+def save_caption_to_batch(campaign_id:str,batch_id:str,caption:str): #保存caption到batch文件夹的caption.txt
+    base=Path(__file__).parent.parent.parent/BASE_DIR
+    batch_folder=base/campaign_id/batch_id
+    batch_folder.mkdir(parents=True,exist_ok=True)
+    caption_file=batch_folder/"caption.txt"
+    with open(caption_file,"w",encoding="utf-8") as f:f.write(caption)
+    print(f"💾 Caption保存到: {caption_file}")
+
+# 服务函数 - 上传到Supabase
+async def save_to_supabase(file_path:Path,campaign_id:str,batch_id:str)->Optional[tuple[str,str]]: #上传文件到Supabase并保存元数据，返回(storage_path, public_url)
+    supabase_client = _init_supabase()
+    if not supabase_client:return None
+    try:
+        user_id=current_user_id.get() or USER_ID #优先使用上下文user_id，否则使用默认值
+        storage_path=f"{user_id}/{campaign_id}/{batch_id}/{file_path.parent.name}/{file_path.name}"
+        file_size=file_path.stat().st_size if file_path.exists() else 0
+        mime_type="image/jpeg" if file_path.suffix==".jpg" else "video/mp4" if file_path.suffix==".mp4" else "application/octet-stream"
+        print(f"☁️  [SAVE_TO_SUPABASE] 开始上传: {storage_path}")
+        print(f"☁️  [SAVE_TO_SUPABASE] 文件大小: {file_size} bytes, MIME: {mime_type}")
+
+        # 1. 获取或创建campaign folder
+        print(f"📁 [SAVE_TO_SUPABASE] 获取campaign folder: {campaign_id}")
+        campaign_folder_storage_path=f"{user_id}/{campaign_id}"
+        campaign_query=supabase.table("user_folders").select("id").eq("user_id",user_id).eq("storage_path",campaign_folder_storage_path).execute()
+        if campaign_query.data:
+            campaign_folder_id=campaign_query.data[0]["id"]
+            print(f"✅ [SAVE_TO_SUPABASE] Campaign folder存在: {campaign_folder_id}")
+        else:
+            campaign_folder_data={"user_id":user_id,"folder_name":campaign_id,"parent_folder_id":None,"storage_path":campaign_folder_storage_path,"campaign_id":campaign_id,"folder_type":"campaign","batch_number":0}
+            campaign_folder_result=supabase.table("user_folders").upsert(campaign_folder_data,on_conflict="user_id,storage_path").execute()
+            campaign_folder_id=campaign_folder_result.data[0]["id"]
+            print(f"✅ [SAVE_TO_SUPABASE] Campaign folder创建: {campaign_folder_id}")
+
+        # 2. 获取或创建batch folder
+        print(f"📁 [SAVE_TO_SUPABASE] 获取batch folder: {batch_id}")
+        batch_folder_storage_path=f"{user_id}/{campaign_id}/{batch_id}"
+        batch_number=int(batch_id) if batch_id.isdigit() else 0
+        batch_query=supabase.table("user_folders").select("id").eq("user_id",user_id).eq("storage_path",batch_folder_storage_path).execute()
+        if batch_query.data:
+            batch_folder_id=batch_query.data[0]["id"]
+            print(f"✅ [SAVE_TO_SUPABASE] Batch folder存在: {batch_folder_id}")
+        else:
+            batch_folder_data={"user_id":user_id,"folder_name":str(batch_id),"parent_folder_id":campaign_folder_id,"storage_path":batch_folder_storage_path,"campaign_id":campaign_id,"folder_type":"batch","batch_number":batch_number}
+            batch_folder_result=supabase.table("user_folders").upsert(batch_folder_data,on_conflict="user_id,storage_path").execute()
+            batch_folder_id=batch_folder_result.data[0]["id"]
+            print(f"✅ [SAVE_TO_SUPABASE] Batch folder创建: {batch_folder_id}")
+
+        # 3. 上传文件到storage
+        with open(file_path,"rb") as f:
+            file_content=f.read()
+            try: # 尝试上传新文件
+                supabase.storage.from_("files").upload(storage_path,file_content,file_options={"cache_control":"3600"})
+                print(f"✅ [SAVE_TO_SUPABASE] 文件上传成功")
+            except Exception as upload_error:
+                if "409" in str(upload_error) or "Duplicate" in str(upload_error) or "already exists" in str(upload_error): # 文件已存在，使用update覆盖
+                    print(f"⚠️  [SAVE_TO_SUPABASE] 文件已存在，尝试更新...")
+                    supabase.storage.from_("files").update(storage_path,file_content,file_options={"cache_control":"3600"})
+                    print(f"✅ [SAVE_TO_SUPABASE] 文件更新成功")
+                else:
+                    raise
+
+        # 4. 检查并更新user_files元数据，关联folder_id
+        existing=supabase.table("user_files").select("id").eq("user_id",user_id).eq("storage_path",storage_path).execute()
+        if existing.data:
+            supabase.table("user_files").update({"folder_id":batch_folder_id,"filename":file_path.name,"file_size":file_size,"mime_type":mime_type,"batch_number":batch_number}).eq("user_id",user_id).eq("storage_path",storage_path).execute()
+            print(f"✅ [SAVE_TO_SUPABASE] 元数据更新成功，已关联folder_id: {batch_folder_id}")
+        else:
+            supabase.table("user_files").insert({"user_id":user_id,"folder_id":batch_folder_id,"storage_path":storage_path,"filename":file_path.name,"file_size":file_size,"mime_type":mime_type,"batch_number":batch_number}).execute()
+            print(f"✅ [SAVE_TO_SUPABASE] 元数据保存成功，已关联folder_id: {batch_folder_id}")
+
+        print(f"🔗 [SAVE_TO_SUPABASE] 生成签名URL...")
+        signed_url_response=supabase.storage.from_("files").create_signed_url(storage_path,expires_in=3600)
+        print(f"🔗 [SAVE_TO_SUPABASE] 响应类型: {type(signed_url_response)}")
+        print(f"🔗 [SAVE_TO_SUPABASE] 响应内容: {signed_url_response}")
+
+        public_url=None
+        if isinstance(signed_url_response,dict):
+            public_url=(signed_url_response.get("signedURL") or
+                       signed_url_response.get("signedUrl") or
+                       signed_url_response.get("signed_url") or
+                       signed_url_response.get("url"))
+            if public_url:
+                print(f"✅ [SAVE_TO_SUPABASE] 签名URL: {public_url[:100]}...")
+            else:
+                print(f"⚠️  [SAVE_TO_SUPABASE] 字典无URL字段, keys={list(signed_url_response.keys())}")
+        elif isinstance(signed_url_response,str):
+            public_url=signed_url_response
+            print(f"✅ [SAVE_TO_SUPABASE] 签名URL(字符串): {public_url[:100]}...")
+        else:
+            print(f"⚠️  [SAVE_TO_SUPABASE] 意外响应类型: {type(signed_url_response)}")
+
+        return (storage_path,public_url)
+    except Exception as e:
+        print(f"❌ [SAVE_TO_SUPABASE] 异常: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"📋 [SAVE_TO_SUPABASE] 堆栈:\n{traceback.format_exc()}")
+        return None
+
+# 服务函数 - 通过asset_id获取图片URL
+async def get_image_url_from_asset_id(asset_id:str)->Optional[str]: #通过asset_id获取图片URL
+    """从Supabase获取图片的公开访问URL"""
+    supabase_client = _init_supabase()
+    if not supabase_client:raise RuntimeError("Supabase未配置")
+    try:
+        print(f"🔍 [GET_IMAGE_URL] 查询文件记录: asset_id={asset_id}")
+        response=supabase.table("user_files").select("storage_path,filename").eq("id",asset_id).single().execute()
+        if not response.data:
+            print(f"❌ [GET_IMAGE_URL] 文件记录不存在")
+            raise Exception("文件不存在")
+        storage_path=response.data.get("storage_path")
+        print(f"✅ [GET_IMAGE_URL] 找到文件: storage_path={storage_path}")
+
+        print(f"🔗 [GET_IMAGE_URL] 调用create_signed_url: bucket=files, path={storage_path}, expires=3600s")
+        signed_url_response=supabase.storage.from_("files").create_signed_url(storage_path,expires_in=3600)
+        print(f"🔗 [GET_IMAGE_URL] 响应类型: {type(signed_url_response)}")
+        print(f"🔗 [GET_IMAGE_URL] 响应内容: {signed_url_response}")
+
+        if isinstance(signed_url_response,dict):
+            signed_url=signed_url_response.get("signedURL") or signed_url_response.get("signedUrl")
+            if signed_url:
+                print(f"✅ [GET_IMAGE_URL] 获取签名URL成功: {signed_url[:80]}...")
+                return signed_url
+            else:
+                print(f"❌ [GET_IMAGE_URL] 字典中无signedURL字段, keys={list(signed_url_response.keys())}")
+        elif isinstance(signed_url_response,str):
+            print(f"✅ [GET_IMAGE_URL] 直接返回URL字符串: {signed_url_response[:80]}...")
+            return signed_url_response
+        else:
+            print(f"❌ [GET_IMAGE_URL] 意外的响应类型: {type(signed_url_response)}")
+        raise Exception(f"生成签名URL失败: 响应类型={type(signed_url_response)}, 内容={signed_url_response}")
+    except Exception as e:
+        print(f"❌ [GET_IMAGE_URL] 异常: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"📋 [GET_IMAGE_URL] 堆栈:\n{traceback.format_exc()}")
+        return None
+
+# 服务函数 - 文本生成图片
+async def image_gen_service(campaign_id:str,batch_id:str,prompt:str,return_id:bool=False)->str: #Generate an image from text prompt. If return_id=True, returns asset_id only
+    print(f"\n{'='*60}")
+    print(f"🎨 [IMAGE_GEN_SERVICE] 服务调用开始")
+    print(f"📋 参数: campaign_id={campaign_id}, batch_id={batch_id}")
+    print(f"📋 prompt={prompt}")
+    print(f"📋 return_id={return_id}")
+    print(f"{'='*60}\n")
+    try:
+        print(f"📁 [IMAGE_GEN_SERVICE] 创建文件夹结构...")
+        image_folder,_=ensure_folder_structure(campaign_id,batch_id)
+        print(f"✅ [IMAGE_GEN_SERVICE] 文件夹路径: {image_folder}")
+
+        print(f"🚀 [IMAGE_GEN_SERVICE] 调用FAL AI API...")
+        result=await fal_subscribe("fal-ai/nano-banana",{"prompt":prompt,"num_images":1,"aspect_ratio":"1:1","output_format":"jpeg"})
+        print(f"✅ [IMAGE_GEN_SERVICE] FAL AI响应成功")
+        print(f"📦 [IMAGE_GEN_SERVICE] 完整返回结果: {result}")
+
+        image_url=result.get("images",[{}])[0].get("url")
+        print(f"🔍 [IMAGE_GEN_SERVICE] 解析结果: images数组={result.get('images')}")
+        if not image_url:raise RuntimeError("未获取到图片URL")
+        print(f"🔗 [IMAGE_GEN_SERVICE] 图片URL: {image_url}")
+
+        print(f"⬇️  [IMAGE_GEN_SERVICE] 下载图片...")
+        async with httpx.AsyncClient() as client:
+            img_resp=await client.get(image_url)
+            print(f"✅ [IMAGE_GEN_SERVICE] 下载完成，大小: {len(img_resp.content)} bytes")
+            timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename=f"image_{timestamp}.jpg";file_path=image_folder/filename
+            with open(file_path,"wb") as f:f.write(img_resp.content)
+            print(f"💾 [IMAGE_GEN_SERVICE] 本地保存: {file_path}")
+
+        print(f"☁️  [IMAGE_GEN_SERVICE] 上传到Supabase...")
+        supabase_result=await save_to_supabase(file_path,campaign_id,batch_id)
+
+        asset_id=None
+        supabase_url=None
+        if supabase_result:
+            storage_path,supabase_url=supabase_result
+            if storage_path and supabase:
+                try:
+                    print(f"🔍 [IMAGE_GEN_SERVICE] 查询asset_id...")
+                    db_resp=supabase.table("user_files").select("id").eq("storage_path",storage_path).single().execute()
+                    if db_resp.data:
+                        asset_id=db_resp.data.get("id")
+                        print(f"✅ [IMAGE_GEN_SERVICE] Asset ID: {asset_id}")
+                except Exception as e:
+                    print(f"⚠️  [IMAGE_GEN_SERVICE] 获取asset_id失败: {e}")
+
+        if return_id: #如果return_id为True，只返回asset_id
+            if asset_id:
+                print(f"🎉 [IMAGE_GEN_SERVICE] 完成! 返回Asset ID: {asset_id}")
+                return asset_id
+            else:
+                error_msg="Image generated but failed to get asset_id"
+                print(f"⚠️  [IMAGE_GEN_SERVICE] {error_msg}")
+                return error_msg
+        else: #返回完整消息
+            result_msg=f"Image generated successfully and saved to {file_path}. Image URL from FAL: {image_url}"
+            if asset_id:result_msg+=f" Asset ID: {asset_id}"
+            if supabase_url:result_msg+=f" Supabase URL: {supabase_url}"
+            print(f"🎉 [IMAGE_GEN_SERVICE] 完成! {result_msg}")
+            return result_msg
+    except Exception as e:
+        error=f"Image generation failed: {e}"
+        print(f"❌ [IMAGE_GEN_SERVICE] 错误: {error}")
+        return error
+
+# 服务函数 - 图片到图片生成
+async def image_to_image_gen_service(campaign_id:str,batch_id:str,prompt:str,image_asset_id,aspect_ratio:str="9:16",return_id:bool=False)->str: #Generate an image from reference image(s). image_asset_id can be a string (single image) or list[str] (multiple images). aspect_ratio: 21:9, 1:1, 4:3, 3:2, 2:3, 5:4, 4:5, 3:4, 16:9, 9:16. If return_id=True, returns asset_id only
+    print(f"\n{'='*60}")
+    print(f"🎨 [IMAGE_TO_IMAGE_SERVICE] 服务调用开始")
+    print(f"📋 参数: campaign_id={campaign_id}, batch_id={batch_id}")
+    print(f"📋 prompt长度: {len(prompt)} 字符")
+    print(f"📋 image_asset_id={image_asset_id}")
+    print(f"📋 image_asset_id类型: {type(image_asset_id)}")
+    print(f"📋 aspect_ratio={aspect_ratio}")
+    print(f"📋 return_id={return_id}")
+    print(f"{'='*60}\n")
+    try:
+        # 处理单个或多个asset_id
+        if isinstance(image_asset_id,str):
+            asset_ids=[image_asset_id]
+            print(f"🔍 [IMAGE_TO_IMAGE_SERVICE] 单个图片模式")
+        elif isinstance(image_asset_id,list):
+            asset_ids=image_asset_id
+            print(f"🔍 [IMAGE_TO_IMAGE_SERVICE] 多图片模式，共{len(asset_ids)}张")
+        else:
+            raise RuntimeError(f"不支持的image_asset_id类型: {type(image_asset_id)}")
+
+        # 获取所有参考图片URL
+        ref_image_urls=[]
+        for idx,asset_id in enumerate(asset_ids):
+            print(f"🔍 [IMAGE_TO_IMAGE_SERVICE] 获取第{idx+1}张参考图片URL (asset_id: {asset_id})...")
+            ref_url=await get_image_url_from_asset_id(asset_id)
+            if not ref_url:
+                print(f"⚠️  [IMAGE_TO_IMAGE_SERVICE] 无法获取asset_id={asset_id}的URL，跳过")
+                continue
+            ref_image_urls.append(ref_url)
+            print(f"✅ [IMAGE_TO_IMAGE_SERVICE] 第{idx+1}张URL长度: {len(ref_url)}")
+            print(f"🔗 [IMAGE_TO_IMAGE_SERVICE] URL前缀: {ref_url[:80]}...")
+
+        if not ref_image_urls:
+            print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 无法获取任何参考图片URL")
+            raise RuntimeError("无法获取参考图片URL")
+
+        print(f"✅ [IMAGE_TO_IMAGE_SERVICE] 成功获取{len(ref_image_urls)}张参考图片URL")
+
+        print(f"📁 [IMAGE_TO_IMAGE_SERVICE] 创建文件夹结构...")
+        image_folder,_=ensure_folder_structure(campaign_id,batch_id)
+        print(f"✅ [IMAGE_TO_IMAGE_SERVICE] 文件夹: {image_folder}")
+
+        api_params={"prompt":prompt,"image_urls":ref_image_urls,"num_images":1,"aspect_ratio":aspect_ratio,"output_format":"jpeg"}
+        print(f"🚀 [IMAGE_TO_IMAGE_SERVICE] 调用FAL AI nano-banana/edit API...")
+        print(f"📋 [IMAGE_TO_IMAGE_SERVICE] 参数keys: {list(api_params.keys())}")
+        print(f"📋 [IMAGE_TO_IMAGE_SERVICE] 使用{len(ref_image_urls)}张参考图片，宽高比: {aspect_ratio}")
+        result=await fal_subscribe("fal-ai/nano-banana/edit",api_params)
+        print(f"✅ [IMAGE_TO_IMAGE_SERVICE] FAL AI响应成功")
+        print(f"📦 [IMAGE_TO_IMAGE_SERVICE] 返回类型: {type(result)}")
+        print(f"📦 [IMAGE_TO_IMAGE_SERVICE] 返回keys: {list(result.keys()) if isinstance(result,dict) else 'N/A'}")
+        print(f"📦 [IMAGE_TO_IMAGE_SERVICE] 完整结果: {str(result)[:500]}...")
+
+        images_array=result.get("images",[])
+        print(f"🔍 [IMAGE_TO_IMAGE_SERVICE] images字段类型: {type(images_array)}, 长度: {len(images_array) if isinstance(images_array,list) else 'N/A'}")
+        if not images_array:
+            print(f"❌ [IMAGE_TO_IMAGE_SERVICE] images数组为空或不存在")
+            raise RuntimeError("FAL API未返回图片数据")
+        image_url=images_array[0].get("url") if len(images_array)>0 else None
+        if not image_url:
+            print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 第一个图片对象没有URL")
+            print(f"📋 [IMAGE_TO_IMAGE_SERVICE] images[0]内容: {images_array[0] if len(images_array)>0 else 'N/A'}")
+            raise RuntimeError("未获取到图片URL")
+        print(f"🔗 [IMAGE_TO_IMAGE_SERVICE] 图片URL: {image_url[:100]}...")
+
+        print(f"⬇️  [IMAGE_TO_IMAGE_SERVICE] 开始下载图片...")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            img_resp=await client.get(image_url)
+            print(f"📥 [IMAGE_TO_IMAGE_SERVICE] 下载状态码: {img_resp.status_code}")
+            if img_resp.status_code!=200:
+                print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 下载失败: HTTP {img_resp.status_code}")
+                raise RuntimeError(f"下载图片失败: HTTP {img_resp.status_code}")
+            print(f"✅ [IMAGE_TO_IMAGE_SERVICE] 下载完成，大小: {len(img_resp.content)} bytes")
+            timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename=f"image_i2i_{timestamp}.jpg";file_path=image_folder/filename
+            with open(file_path,"wb") as f:f.write(img_resp.content)
+            print(f"💾 [IMAGE_TO_IMAGE_SERVICE] 本地保存: {file_path}")
+
+        print(f"☁️  [IMAGE_TO_IMAGE_SERVICE] 上传到Supabase...")
+        supabase_result=await save_to_supabase(file_path,campaign_id,batch_id)
+
+        asset_id=None
+        supabase_url=None
+        if supabase_result:
+            storage_path,supabase_url=supabase_result
+            if storage_path and supabase:
+                try:
+                    print(f"🔍 [IMAGE_TO_IMAGE_SERVICE] 查询asset_id...")
+                    db_resp=supabase.table("user_files").select("id").eq("storage_path",storage_path).single().execute()
+                    if db_resp.data:
+                        asset_id=db_resp.data.get("id")
+                        print(f"✅ [IMAGE_TO_IMAGE_SERVICE] Asset ID: {asset_id}")
+                except Exception as e:
+                    print(f"⚠️  [IMAGE_TO_IMAGE_SERVICE] 获取asset_id失败: {e}")
+
+        if return_id: #如果return_id为True，只返回asset_id
+            if asset_id:
+                print(f"🎉 [IMAGE_TO_IMAGE_SERVICE] 完成! 返回Asset ID: {asset_id}")
+                return asset_id
+            else:
+                error_msg=f"Image-to-image generated using {len(ref_image_urls)} reference image(s) but failed to get asset_id"
+                print(f"⚠️  [IMAGE_TO_IMAGE_SERVICE] {error_msg}")
+                return error_msg
+        else: #返回完整消息
+            result_msg=f"Image-to-image generated successfully using {len(ref_image_urls)} reference image(s) and saved to {file_path}. Image URL from FAL: {image_url}"
+            if asset_id:result_msg+=f" Asset ID: {asset_id}"
+            if supabase_url:result_msg+=f" Supabase URL: {supabase_url}"
+            print(f"🎉 [IMAGE_TO_IMAGE_SERVICE] 完成! 使用{len(ref_image_urls)}张参考图片")
+            return result_msg
+    except TimeoutError as e:
+        error=f"Image-to-image generation failed: 请求超时 - {str(e)}"
+        print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 超时错误: {error}")
+        return error
+    except Exception as e:
+        error=f"Image-to-image generation failed: {str(e)}"
+        print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 异常类型: {type(e).__name__}")
+        print(f"❌ [IMAGE_TO_IMAGE_SERVICE] 异常详情: {str(e)}")
+        import traceback
+        print(f"📋 [IMAGE_TO_IMAGE_SERVICE] 堆栈跟踪:\n{traceback.format_exc()}")
+        return error
+
+# 服务函数 - 视频生成
+async def video_gen_service(campaign_id:str,batch_id:str,prompt:str,image_asset_id:str,return_id:bool=False)->str: #Generate a video from an image. If return_id=True, returns asset_id only
+    print(f"\n{'='*60}")
+    print(f"🎬 [VIDEO_GEN_SERVICE] 服务调用开始")
+    print(f"📋 参数: campaign_id={campaign_id}, batch_id={batch_id}")
+    print(f"📋 prompt={prompt}")
+    print(f"📋 image_asset_id={image_asset_id}")
+    print(f"📋 return_id={return_id}")
+    print(f"{'='*60}\n")
+    try:
+        print(f"🔍 [VIDEO_GEN_SERVICE] 获取图片URL (asset_id: {image_asset_id})...")
+        image_url=await get_image_url_from_asset_id(image_asset_id)
+        if not image_url:raise RuntimeError("无法获取图片URL")
+        print(f"✅ [VIDEO_GEN_SERVICE] 图片URL: {image_url[:80]}...")
+
+        print(f"📁 [VIDEO_GEN_SERVICE] 创建文件夹结构...")
+        _,video_folder=ensure_folder_structure(campaign_id,batch_id)
+        print(f"✅ [VIDEO_GEN_SERVICE] 文件夹路径: {video_folder}")
+
+        print(f"🚀 [VIDEO_GEN_SERVICE] 调用FAL AI SeeDance API...")
+        result=await fal_subscribe("fal-ai/bytedance/seedance/v1/pro/image-to-video",{"prompt":prompt,"image_url":image_url})
+        print(f"✅ [VIDEO_GEN_SERVICE] FAL AI响应成功")
+        print(f"📦 [VIDEO_GEN_SERVICE] 完整返回结果: {result}")
+
+        video_url=result.get("video",{}).get("url")
+        print(f"🔍 [VIDEO_GEN_SERVICE] 解析结果: video对象={result.get('video')}")
+        if not video_url:raise RuntimeError("未获取到视频URL")
+        print(f"🔗 [VIDEO_GEN_SERVICE] 视频URL: {video_url}")
+
+        print(f"⬇️  [VIDEO_GEN_SERVICE] 下载视频...")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            vid_resp=await client.get(video_url)
+            print(f"✅ [VIDEO_GEN_SERVICE] 下载完成，大小: {len(vid_resp.content)} bytes")
+            timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename=f"video_{timestamp}.mp4";file_path=video_folder/filename
+            with open(file_path,"wb") as f:f.write(vid_resp.content)
+            print(f"💾 [VIDEO_GEN_SERVICE] 本地保存: {file_path}")
+
+        print(f"☁️  [VIDEO_GEN_SERVICE] 上传到Supabase...")
+        supabase_result=await save_to_supabase(file_path,campaign_id,batch_id)
+
+        asset_id=None
+        supabase_url=None
+        if supabase_result:
+            storage_path,supabase_url=supabase_result
+            if storage_path:
+                print(f"✅ [VIDEO_GEN_SERVICE] Supabase路径: {storage_path}")
+                if supabase:
+                    try:
+                        print(f"🔍 [VIDEO_GEN_SERVICE] 查询asset_id...")
+                        db_resp=supabase.table("user_files").select("id").eq("storage_path",storage_path).single().execute()
+                        if db_resp.data:
+                            asset_id=db_resp.data.get("id")
+                            print(f"✅ [VIDEO_GEN_SERVICE] Asset ID: {asset_id}")
+                    except Exception as e:
+                        print(f"⚠️  [VIDEO_GEN_SERVICE] 获取asset_id失败: {e}")
+
+        if return_id: #如果return_id为True，只返回asset_id
+            if asset_id:
+                print(f"🎉 [VIDEO_GEN_SERVICE] 完成! 返回Asset ID: {asset_id}")
+                return asset_id
+            else:
+                error_msg="Video generated but failed to get asset_id"
+                print(f"⚠️  [VIDEO_GEN_SERVICE] {error_msg}")
+                return error_msg
+        else: #返回完整消息
+            result_msg=f"Video generated successfully and saved to {file_path}. Video URL from FAL: {video_url}"
+            if asset_id:result_msg+=f" Asset ID: {asset_id}"
+            if supabase_url:result_msg+=f" Supabase URL: {supabase_url}"
+            print(f"🎉 [VIDEO_GEN_SERVICE] 完成! {result_msg}")
+            return result_msg
+    except Exception as e:
+        error=f"Video generation failed: {e}"
+        print(f"❌ [VIDEO_GEN_SERVICE] 错误: {error}")
+        return error
+
+# 服务函数 - 通过asset_id获取本地文件路径
+def get_local_file_path_from_asset_id(asset_id:str)->Optional[str]: #通过asset_id获取本地文件路径
+    """从数据库查询storage_path并构建本地文件路径"""
+    supabase_client = _init_supabase()
+    if not supabase_client:
+        print(f"⚠️  [GET_LOCAL_PATH] Supabase未配置")
+        return None
+    try:
+        print(f"🔍 [GET_LOCAL_PATH] 查询asset_id: {asset_id}")
+        response=supabase.table("user_files").select("storage_path,filename").eq("id",asset_id).single().execute()
+        if not response.data:
+            print(f"❌ [GET_LOCAL_PATH] 文件记录不存在")
+            return None
+        storage_path=response.data.get("storage_path")
+        filename=response.data.get("filename")
+        print(f"✅ [GET_LOCAL_PATH] storage_path: {storage_path}")
+
+        # 从storage_path解析出campaign_id, batch_id - 格式: user_id/campaign_id/batch_id/images/filename.jpg
+        parts=storage_path.split('/')
+        if len(parts)<5:
+            print(f"❌ [GET_LOCAL_PATH] storage_path格式不正确: {storage_path}")
+            return None
+        campaign_id=parts[1]
+        batch_id=parts[2]
+        folder_type=parts[3] # images或videos
+
+        base=Path(__file__).parent.parent.parent/BASE_DIR # 构建本地路径
+        local_path=base/campaign_id/batch_id/folder_type/filename
+        print(f"📁 [GET_LOCAL_PATH] 本地路径: {local_path}")
+
+        if local_path.exists():
+            print(f"✅ [GET_LOCAL_PATH] 文件存在")
+            return str(local_path)
+        else:
+            print(f"⚠️  [GET_LOCAL_PATH] 文件不存在: {local_path}")
+            return None
+    except Exception as e:
+        print(f"❌ [GET_LOCAL_PATH] 异常: {e}")
+        import traceback
+        print(f"📋 [GET_LOCAL_PATH] 堆栈:\n{traceback.format_exc()}")
+        return None
+
+# 服务函数 - 首尾帧生成视频
+async def first_end_to_video(campaign_id:str,batch_id:str,prompt:str,first_frame_asset_id:str,last_frame_asset_id:str,model:str="wan",num_frames:int=81,frames_per_second:int=16,aspect_ratio:str="auto",resolution:str="720p",num_inference_steps:int=30,return_id:bool=False,return_path:bool=False)->str: #Generate video from first and last frame. model: wan/veo (default: wan). num_frames: 81-100, frames_per_second: 5-24, aspect_ratio: auto/16:9/9:16/1:1, resolution: 480p/720p (wan) or 720p/1080p (veo), num_inference_steps: 2-40. If return_id=True, returns asset_id only. If return_path=True, returns local file path only
+    print(f"\n{'='*60}")
+    print(f"🎬 [FIRST_END_TO_VIDEO] 服务调用开始")
+    print(f"📋 参数: campaign_id={campaign_id}, batch_id={batch_id}")
+    print(f"📋 model={model}")
+    print(f"📋 prompt={prompt}")
+    print(f"📋 first_frame_asset_id={first_frame_asset_id}")
+    print(f"📋 last_frame_asset_id={last_frame_asset_id}")
+    print(f"📋 num_frames={num_frames}, frames_per_second={frames_per_second}")
+    print(f"📋 aspect_ratio={aspect_ratio}, resolution={resolution}")
+    print(f"📋 num_inference_steps={num_inference_steps}")
+    print(f"📋 return_id={return_id}, return_path={return_path}")
+    print(f"{'='*60}\n")
+    try:
+        print(f"🔍 [FIRST_END_TO_VIDEO] 获取第一帧URL (asset_id: {first_frame_asset_id})...")
+        first_frame_url=await get_image_url_from_asset_id(first_frame_asset_id)
+        if not first_frame_url:raise RuntimeError("无法获取第一帧图片URL")
+        print(f"✅ [FIRST_END_TO_VIDEO] 第一帧URL: {first_frame_url[:80]}...")
+
+        print(f"🔍 [FIRST_END_TO_VIDEO] 获取最后一帧URL (asset_id: {last_frame_asset_id})...")
+        last_frame_url=await get_image_url_from_asset_id(last_frame_asset_id)
+        if not last_frame_url:raise RuntimeError("无法获取最后一帧图片URL")
+        print(f"✅ [FIRST_END_TO_VIDEO] 最后一帧URL: {last_frame_url[:80]}...")
+
+        print(f"📁 [FIRST_END_TO_VIDEO] 创建文件夹结构...")
+        _,video_folder=ensure_folder_structure(campaign_id,batch_id)
+        print(f"✅ [FIRST_END_TO_VIDEO] 文件夹路径: {video_folder}")
+
+        # 根据模型选择API endpoint和参数
+        if model=="wan": # Wan-2.1模型
+            api_params={"start_image_url":first_frame_url,"end_image_url":last_frame_url,"prompt":prompt,"num_frames":num_frames,"frames_per_second":frames_per_second,"aspect_ratio":aspect_ratio,"resolution":resolution,"num_inference_steps":num_inference_steps}
+            endpoint="fal-ai/wan-flf2v"
+            print(f"🚀 [FIRST_END_TO_VIDEO] 调用FAL AI Wan-2.1 API...")
+        elif model=="veo": # Veo3.1模型
+            duration=f"{int(num_frames/frames_per_second)}s" # 转换为duration格式
+            api_params={"first_frame_url":first_frame_url,"last_frame_url":last_frame_url,"prompt":prompt,"duration":duration,"aspect_ratio":aspect_ratio,"resolution":resolution,"generate_audio":False}
+            endpoint="fal-ai/veo3.1/fast/first-last-frame-to-video"
+            print(f"🚀 [FIRST_END_TO_VIDEO] 调用FAL AI Veo3.1 API...")
+        else:
+            raise ValueError(f"不支持的模型: {model}. 支持的模型: wan, veo")
+
+        print(f"📋 [FIRST_END_TO_VIDEO] API参数: {api_params}")
+        result=await fal_subscribe(endpoint,api_params)
+        print(f"✅ [FIRST_END_TO_VIDEO] FAL AI响应成功")
+        print(f"📦 [FIRST_END_TO_VIDEO] 完整返回结果: {result}")
+
+        video_url=result.get("video",{}).get("url")
+        print(f"🔍 [FIRST_END_TO_VIDEO] 解析结果: video对象={result.get('video')}")
+        if not video_url:raise RuntimeError("未获取到视频URL")
+        print(f"🔗 [FIRST_END_TO_VIDEO] 视频URL: {video_url}")
+
+        print(f"⬇️  [FIRST_END_TO_VIDEO] 下载视频...")
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            vid_resp=await client.get(video_url)
+            print(f"✅ [FIRST_END_TO_VIDEO] 下载完成，大小: {len(vid_resp.content)} bytes")
+            timestamp=datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename=f"video_flf2v_{timestamp}.mp4";file_path=video_folder/filename
+            with open(file_path,"wb") as f:f.write(vid_resp.content)
+            print(f"💾 [FIRST_END_TO_VIDEO] 本地保存: {file_path}")
+
+        print(f"☁️  [FIRST_END_TO_VIDEO] 上传到Supabase...")
+        supabase_result=await save_to_supabase(file_path,campaign_id,batch_id)
+
+        asset_id=None
+        supabase_url=None
+        if supabase_result:
+            storage_path,supabase_url=supabase_result
+            if storage_path:
+                print(f"✅ [FIRST_END_TO_VIDEO] Supabase路径: {storage_path}")
+                if supabase:
+                    try:
+                        print(f"🔍 [FIRST_END_TO_VIDEO] 查询asset_id...")
+                        db_resp=supabase.table("user_files").select("id").eq("storage_path",storage_path).single().execute()
+                        if db_resp.data:
+                            asset_id=db_resp.data.get("id")
+                            print(f"✅ [FIRST_END_TO_VIDEO] Asset ID: {asset_id}")
+                    except Exception as e:
+                        print(f"⚠️  [FIRST_END_TO_VIDEO] 获取asset_id失败: {e}")
+
+        if return_id: #如果return_id为True，只返回asset_id
+            if asset_id:
+                print(f"🎉 [FIRST_END_TO_VIDEO] 完成! 返回Asset ID: {asset_id}")
+                return asset_id
+            else:
+                error_msg="Video generated from first-last frames but failed to get asset_id"
+                print(f"⚠️  [FIRST_END_TO_VIDEO] {error_msg}")
+                return error_msg
+        elif return_path: #如果return_path为True，只返回本地文件路径
+            print(f"🎉 [FIRST_END_TO_VIDEO] 完成! 返回本地路径: {file_path}")
+            return str(file_path)
+        else: #返回完整消息
+            result_msg=f"Video generated successfully from first-last frames and saved to {file_path}. Video URL from FAL: {video_url}"
+            if asset_id:result_msg+=f" Asset ID: {asset_id}"
+            if supabase_url:result_msg+=f" Supabase URL: {supabase_url}"
+            print(f"🎉 [FIRST_END_TO_VIDEO] 完成! {result_msg}")
+            return result_msg
+    except Exception as e:
+        error=f"First-last frame to video generation failed: {e}"
+        print(f"❌ [FIRST_END_TO_VIDEO] 错误: {error}")
+        return error
+
+# 视频拼接服务函数
+logger=logging.getLogger("mcp_content_gen.video_stitch")
+
+async def run_ffmpeg(cmd:List[str]): #执行FFmpeg命令
+    logger.info(f"执行FFmpeg命令: {' '.join(cmd)}")
+    process=await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    stdout,stderr=await process.communicate()
+    if process.returncode!=0:
+        error_msg=stderr.decode() if stderr else "未知错误"
+        logger.error(f"FFmpeg执行失败: {error_msg}")
+        raise RuntimeError(f"FFmpeg执行失败: {error_msg}")
+    return stdout.decode() if stdout else ""
+
+def ensure_output_dir(output_path:Path)->Path: #确保输出目录存在
+    output_path.parent.mkdir(parents=True,exist_ok=True)
+    return output_path
+
+async def stitch_videos(segment_paths:List[str],output_path:str,trim_duration:float=7.9)->str: #拼接多个视频片段为一个完整视频。segment_paths: 视频片段路径列表，output_path: 输出视频路径，trim_duration: 非最后片段的裁剪时长(秒)，默认7.9秒。返回: 输出视频的路径
+    if not segment_paths:
+        raise ValueError("视频片段列表不能为空")
+
+    output=ensure_output_dir(Path(output_path))
+    logger.info(f"开始拼接 {len(segment_paths)} 个视频片段到: {output}")
+
+    # 如果只有一个片段，直接复制
+    if len(segment_paths)==1:
+        cmd=[FFMPEG_BIN,"-i",segment_paths[0],"-c","copy","-y",str(output)]
+        await run_ffmpeg(cmd)
+        logger.info(f"单个片段直接复制完成: {output}")
+        return str(output)
+
+    # 构建filter_complex: 裁剪每个片段(除最后一个)的尾部
+    filter_complex=[]
+    concat_inputs=[]
+
+    for i,path in enumerate(segment_paths):
+        is_last=(i==len(segment_paths)-1)
+
+        if is_last:
+            concat_inputs.append(f"[{i}:v]") #最后一个片段保持完整
+        else:
+            filter_complex.append(f"[{i}:v]trim=duration={trim_duration},setpts=PTS-STARTPTS[v{i}]") #其他片段裁剪尾部
+            concat_inputs.append(f"[v{i}]")
+
+    # 构建完整的filter
+    if filter_complex:
+        concat_filter=";".join(filter_complex)+";"+"".join(concat_inputs)+f"concat=n={len(segment_paths)}:v=1:a=0[out]"
+    else:
+        concat_filter="".join(concat_inputs)+f"concat=n={len(segment_paths)}:v=1:a=0[out]"
+
+    # 构建FFmpeg命令
+    cmd=[FFMPEG_BIN]
+
+    # 输入文件
+    for path in segment_paths:
+        cmd.extend(["-i",path])
+
+    # 应用过滤器
+    cmd.extend([
+        "-filter_complex",concat_filter,
+        "-map","[out]",
+        "-c:v","libx264", #重新编码以应用裁剪
+        "-preset","fast", #快速编码
+        "-crf","23", #保持质量
+        "-y",str(output)
+    ])
+
+    await run_ffmpeg(cmd)
+    logger.info(f"视频拼接完成: {output}")
+    return str(output)
+
+async def stitch_campaign_videos(campaign_id:str,batch_id:str,segment_paths:List[str],output_filename:str="stitched.mp4")->str: #拼接活动视频片段。campaign_id: 活动UUID，batch_id: 批次ID，segment_paths: 视频片段路径列表，output_filename: 输出文件名。返回: 输出视频的绝对路径
+    base_dir=Path("generated_campaigns")/campaign_id/batch_id/"videos"
+    output_path=base_dir/output_filename
+    return await stitch_videos(segment_paths,str(output_path))
+
+async def extract_video_segments(prompt: str) -> List[Segment]: # 从prompt提取视频分段
+    """使用instructor从prompt中提取结构化的视频分段信息"""
+    try:
+        client=get_instructor_client()
+        if not client:
+            print(f"❌ [UNBOXING_VIDEO_TOOL] OPENAI_API_KEY未配置")
+            return []
+        
+        print(f"🔍 [UNBOXING_VIDEO_TOOL] 开始提取视频分段信息...")
+        
+        response = client.chat.completions.create(
+            response_model=VideoSegments,
+            messages=[
+                {
+                    "role": "system",
+                    "content": script_writer_prompt
+                },
+                {
+                    "role": "user",
+                    "content": f"Analyze this video description and break it into segments:\n\n{prompt}"
+                }
+            ]
+        )
+        
+        print(f"✅ [UNBOXING_VIDEO_TOOL] 成功提取 {len(response.segments)} 个分段")
+        for seg in response.segments:
+            print(f"   📹 分段{seg.id}: {seg.plot[:50]}...")
+        
+        return response.segments
+        
+    except Exception as e:
+        print(f"❌ [UNBOXING_VIDEO_TOOL] 提取分段失败: {e}")
+        return []
+
+async def extract_start_frame(plot: str) -> FrameImageGeneration:
+    """从情节描述中提取起始帧生成信息"""
+    client=get_instructor_client()
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY未配置")
+    response = client.chat.completions.create(
+        response_model=FrameImageGeneration,
+        messages=[
+            {
+                "role": "system",
+                "content": """
+                    You are an expert prompt generator for initial scene generation.
+
+                    **TASK:** Create an image generation prompt for the FIRST FRAME from a plot description.
+
+                    **ANALYSIS:**
+                    - Identify which assets are VISIBLE in the starting state
+                    - Understand hidden vs. visible (if a bag is inside a closed box, only include the box)
+                    - Extract asset IDs only for objects appearing in frame 1
+
+                    **PROMPT FORMULA:** Subject + State/Position + Spatial Relationships
+
+                    Example structure:
+                    - "A closed white box sits on a wooden table"
+                    - "A white bag and wooden crate sit side by side on a table, bag on the left"
+                    - "An open white box on a table with a blue bag visible inside"
+
+                    **RULES:**
+                    - NEVER mention asset IDs in prompt text (use descriptive names)
+                    - ONLY include VISIBLE assets in starting state
+                    - If object is hidden (inside closed container), exclude it
+                    - NO elements not in plot/asset list
+                    - Keep environment minimal (simple table, neutral background)
+                    - NO lighting, camera angles, or artistic descriptions
+                    - Focus on positions and states only
+
+                    **OUTPUT FORMAT:**
+                    ```
+                    Prompt: [Complete generation instruction]
+                    Asset IDs to Include: [Only VISIBLE assets in frame 1]
+                    ```
+
+                    **EXAMPLES:**
+
+                    Plot: "A closed white box sits on a table. Inside is a blue bag (hidden)."
+                    ```
+                    Prompt: A closed white box sits in the center of a wooden table.
+                    Asset IDs: [white_box_id]
+                    ```
+
+                    Plot: "An open white box on a table with a blue bag visible inside."
+                    ```
+                    Prompt: An open white box sits on a wooden table with a blue bag visible inside the box.
+                    Asset IDs: [white_box_id, blue_bag_id]
+                    ```
+                    """
+            },
+            {
+                "role": "user",
+                "content": f"Plot: {plot}"
+            }
+        ]
+    )
+    return response
+
+async def extract_video_prompt(plot: str, previous_segment_prompt: str = None) -> str: # 从plot生成视频prompt
+    """从情节描述中生成视频生成prompt"""
+    openai_client=get_openai_client()
+    if not openai_client:
+        raise RuntimeError("OPENAI_API_KEY未配置")
+    response = await openai_client.chat.completions.create(
+        model="gpt-5",
+        messages=[
+            {
+                "role": "system",
+                "content": """You are the best first-end frame video prompt generator.
+Your task: Given a plot description, two frame states (start/end), and optionally the previous segment's video prompt, generate a concise video prompt that describes the transition motion with precise directional details and maintains visual consistency.
+Rules:
+
+Be concise but directionally specific (3-4 sentences max)
+Include precise movement directions: from right/left, upward/downward, toward/away from camera, clockwise/counterclockwise
+Maintain consistency: If previous prompt mentions features of hands, body, color of gloves, movement directions, keep them identical for operation consistency
+Describe the action path clearly: where objects/hands enter, move, and exit
+Add camera movement only if needed (push in, pull back, slight tilt, pan)
+Include studio-quality ASMR sound matching the action (box opening, bag rustling, gentle touches)
+Use present tense, active voice
+Skip IDs - describe objects naturally (e.g., "luxury watch box" not "6525c1c8...")
+
+```
+
+**Example:**
+```
+Previous segment: "Right hand in black glove enters from right side of frame, reaches toward silver box on gray table"
+
+Current plot: "The luxury watch box is centered on a matte gray table, lid fully closed. A right hand in black gloves slowly lifts and removes the lid upward to reveal the watch inside, then exits frame to the right, leaving the box open."
+
+Output: "Right hand in black glove grips box lid enters from right side of frame, lifts it upward and removes it completely, revealing watch inside. Hand exits right side of frame with lid, leaving open box centered on table."""
+            },
+            {
+                "role": "user",
+                "content": f"Convert this plot into a video generation prompt:\n\n{plot}, you can refer to some details for consistency from previous segment's prompt: {previous_segment_prompt}"
+            }
+        ]
+    )
+    return response.choices[0].message.content
+
+async def extract_end_frame(plot: str, previous_frame_prompt: str) -> FrameImageGeneration:
+    """从情节描述中提取结束帧生成信息"""
+    client=get_instructor_client()
+    if not client:
+        raise RuntimeError("OPENAI_API_KEY未配置")
+    response = client.chat.completions.create(
+        response_model=FrameImageGeneration,
+        messages=[
+            {
+                "role": "system",
+                "content": """
+You are an expert prompt generator for sequential image editing.
+
+**CRITICAL: Describe FINAL STATES, not actions or motion.**
+
+❌ WRONG: "A hand lifts the bag from the box"
+✅ RIGHT: "The bag sits on the table. The box is empty."
+
+**ANALYSIS:**
+- Ignore motion/process in plot (hand movements, lifting, sliding)
+- Identify FINAL STATE: Where are objects? What's visible? 
+- Extract asset IDs for newly visible objects
+- **EDGE CASE**: If an asset was hidden/blocked in previous frame (inside closed box, behind object, etc.) and now becomes fully visible, extract its asset ID even if it appeared earlier
+
+**PROMPT FORMULA:**
+
+1. **Reference images**: State what images are provided
+   - Always: "Using the provided previous frame image as the basis"
+   - If new/newly-visible assets: "and the provided [asset name] image"
+
+2. **Final state**: Describe what IS visible (present tense)
+   - "The box lid is open, revealing the white bag inside"
+   - "The bag sits centered on the table"
+   - "No hands are visible"
+   - "If bag is picked up from the box, the box should be empty"
+
+3. **Consistency preservation**: Be SPECIFIC about unchanged elements
+   - List concrete elements: "Keep the wooden box, camera angle, lighting, background texture, and table surface exactly as shown in the reference image."
+   - NOT vague phrases like "Keep everything else the same"
+
+**RULES:**
+- NEVER describe actions/motion (lifting, sliding, entering)
+- ALWAYS mention provided asset images in the prompt
+- Extract asset ID if previously hidden (inside box, blocked) and now visible
+- NEVER mention asset IDs in prompt (use descriptive names)
+- Describe final positions only
+- Be SPECIFIC about what stays unchanged (box position, lighting, camera angle, background, etc.)
+
+**OUTPUT:**
+```
+Prompt: [Complete instruction]
+Asset IDs: [Only NEW or newly-visible objects]
+```
+
+**EXAMPLES:**
+
+Plot: "A hand lifts the box lid, revealing a blue bag. The hand withdraws."
+
+CORRECT:
+```
+Prompt: Using the provided previous frame image as the basis and the provided blue bag image, the box lid is fully open with the blue bag visible inside. No hands are visible. Keep the box position, camera angle, lighting, background, and table surface exactly as shown in the reference image.
+Asset IDs: [blue_bag_id]
+```
+(Bag was hidden, now visible - extract ID)
+
+---
+
+Plot: "A hand lifts the white bag from box to table center. Hand slides box left and exits."
+
+CORRECT:
+```
+Prompt: Using the provided previous frame image as the basis and the provided white bag image, the white bag sits centered on the table. The open empty box is positioned on the left side of the table. No hands are visible. Keep the camera angle, lighting, background texture, and table surface exactly as shown in the reference image.
+Asset IDs: [white_bag_id]
+```
+(Bag was inside box, now fully visible on table - extract ID)
+
+---
+
+Plot: "A hand traces the bag surface. Hand withdraws."
+
+CORRECT:
+```
+Prompt: Using the provided previous frame image as the basis, the white bag remains centered on the table in its current position. No hands are visible. Keep the box position, camera angle, lighting, background, and table surface exactly as shown in the reference image.
+Asset IDs: []
+```
+(Bag was already fully visible and hasn't moved - no ID needed)
+
+**KEY: If asset was hidden/blocked and becomes visible, extract its ID and mention the image is provided. Always list specific elements to preserve rather than using vague "keep everything else the same" language.**
+"""
+            },
+            {
+                "role": "user",
+                "content": f"Plot: {plot} \n Previous frame's prompt: {previous_frame_prompt}"
+            }
+        ]
+    )
+    return response
+
+async def generate_segment_end_frames(segments: List[Segment], campaign_id: str, batch_id: str) -> tuple[List[Segment], dict]: # 为每个分段生成结束帧图片
+    """为每个分段生成结束帧，并将asset_id连接到下一个分段的起始帧
+    
+    Returns:
+        tuple: (segments, prompts_info) - segments列表和prompts信息字典
+    """
+    print(f"\n{'='*80}")
+    print(f"🎨 [GENERATE_END_FRAMES] 开始生成分段结束帧")
+    print(f"📋 共 {len(segments)} 个分段")
+    print(f"{'='*80}\n")
+    
+    previous_frame_prompt = "" # 初始化previous_frame_prompt，用于后续结束帧生成
+    prompts_info = {} # 存储所有提取的prompts信息
+    
+    # 首先为第一个分段生成第一帧（起始帧）
+    if segments and len(segments) > 0:
+        first_segment = segments[0]
+        print(f"\n--- 为第一个分段生成第一帧（起始状态） ---")
+        
+        try:
+            # 提取起始帧FrameImageGeneration
+            first_frame = await extract_start_frame(first_segment.plot)
+            print(f"📝 [分段{first_segment.id}] 提取起始帧prompt: {first_frame.prompt[:80]}...")
+            print(f"📝 [分段{first_segment.id}] 提取asset_ids: {first_frame.image_asset_id}")
+            
+            # 保存起始帧prompt信息
+            prompts_info[f"segment_{first_segment.id}_start"] = {
+                "type": "start_frame",
+                "prompt": first_frame.prompt,
+                "asset_ids": first_frame.image_asset_id
+            }
+            
+            # 使用所有提取到的asset_ids，return_id=True直接返回asset_id
+            first_frame_asset_id = await image_to_image_gen_service(
+                campaign_id=campaign_id,
+                batch_id=batch_id,
+                prompt=first_frame.prompt,
+                image_asset_id=first_frame.image_asset_id,
+                aspect_ratio="16:9",
+                return_id=True
+            )
+            print(f"✅ [分段{first_segment.id}] 第一帧生成完成")
+            
+            if first_frame_asset_id:
+                first_segment.first_frame = first_frame_asset_id
+                previous_frame_prompt = first_frame.prompt # 更新previous_frame_prompt为起始帧的prompt
+                print(f"💾 [分段{first_segment.id}] 第一帧asset_id: {first_frame_asset_id}")
+            else:
+                print(f"⚠️  [分段{first_segment.id}] 生成第一帧失败")
+        except Exception as e:
+            print(f"❌ [分段{first_segment.id}] 生成第一帧异常: {e}")
+    
+    for i, segment in enumerate(segments):
+        print(f"\n--- 处理分段 {segment.id} ({i+1}/{len(segments)}) ---")
+        
+        # 确定当前分段的起始帧asset_id
+        if i == 0:
+            current_first_frame_id = segment.first_frame # 第一个分段使用刚生成的第一帧
+        else:
+            current_first_frame_id = segments[i-1].end_frame # 使用上一个分段的结束帧
+            segment.first_frame = current_first_frame_id
+        
+        print(f"📸 [分段{segment.id}] 起始帧ID: {current_first_frame_id}")
+        
+        # 提取结束帧生成信息，包含previous frame prompt
+        try:
+            frame_gen = await extract_end_frame(segment.plot, previous_frame_prompt)
+            print(f"📝 [分段{segment.id}] 提取结束帧prompt: {frame_gen.prompt[:80]}...")
+            print(f"📝 [分段{segment.id}] 提取asset_ids: {frame_gen.image_asset_id}")
+            
+            # 保存结束帧prompt信息
+            prompts_info[f"segment_{segment.id}_end"] = {
+                "type": "end_frame",
+                "prompt": frame_gen.prompt,
+                "asset_ids": frame_gen.image_asset_id
+            }
+            
+            # 使用所有提取到的asset_ids（不只是第一个），return_id=True直接返回asset_id
+            end_frame_asset_id = await image_to_image_gen_service(
+                campaign_id=campaign_id,
+                batch_id=batch_id,
+                prompt=frame_gen.prompt,
+                image_asset_id=frame_gen.image_asset_id + [segment.first_frame],
+                aspect_ratio="16:9",
+                return_id=True
+            )
+            print(f"✅ [分段{segment.id}] 结束帧生成完成")
+            
+            if end_frame_asset_id:
+                segment.end_frame = end_frame_asset_id # 存储到end_frame字段
+                previous_frame_prompt = frame_gen.prompt # 更新previous_frame_prompt为当前生成的prompt
+                print(f"💾 [分段{segment.id}] 结束帧asset_id: {end_frame_asset_id}")
+                
+                # 如果有下一个分段，设置它的first_frame字段
+                if i < len(segments) - 1:
+                    segments[i+1].first_frame = end_frame_asset_id
+                    print(f"🔗 [分段{segment.id}] 链接到下一个分段的起始帧")
+            else:
+                print(f"⚠️  [分段{segment.id}] 生成失败")
+                
+        except Exception as e:
+            print(f"❌ [分段{segment.id}] 生成结束帧失败: {e}")
+            continue
+    
+    print(f"\n{'='*80}")
+    print(f"✅ [GENERATE_END_FRAMES] 所有分段处理完成")
+    print(f"{'='*80}\n")
+    
+    return segments, prompts_info
+
+def copy_final_frames_to_directory(campaign_id: str, batch_id: str, segments: List[Segment]) -> str: # 复制最终帧到专用目录
+    """将第一个分段的第一帧和所有分段的结束帧复制到final_frames目录（不重复）"""
+    print(f"\n{'='*80}")
+    print(f"📁 [COPY_FINAL_FRAMES] 开始整理最终帧")
+    print(f"{'='*80}\n")
+    
+    # 创建final_frames目录
+    base_dir = Path(__file__).parent.parent.parent / "generated_campaigns"
+    final_frames_dir = base_dir / campaign_id / batch_id / "final_frames"
+    final_frames_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 [COPY_FINAL_FRAMES] 目标目录: {final_frames_dir}")
+    
+    # 收集需要复制的asset_id（不重复）
+    frames_to_copy = []
+    copied_asset_ids = set() # 用于去重
+    
+    # 第一个分段的第一帧
+    if segments and len(segments) > 0 and segments[0].first_frame:
+        first_frame_id = segments[0].first_frame
+        if first_frame_id not in copied_asset_ids:
+            frames_to_copy.append(("first_frame_segment_1", first_frame_id))
+            copied_asset_ids.add(first_frame_id)
+            print(f"📸 [COPY_FINAL_FRAMES] 添加第一帧: {first_frame_id}")
+    
+    # 所有分段的结束帧
+    for segment in segments:
+        if segment.end_frame and segment.end_frame not in copied_asset_ids:
+            frames_to_copy.append((f"end_frame_segment_{segment.id}", segment.end_frame))
+            copied_asset_ids.add(segment.end_frame)
+            print(f"📸 [COPY_FINAL_FRAMES] 添加分段{segment.id}结束帧: {segment.end_frame}")
+    
+    print(f"📊 [COPY_FINAL_FRAMES] 共需要复制 {len(frames_to_copy)} 个不重复的帧")
+    
+    # 复制每一帧
+    copied_files = []
+    for frame_name, asset_id in frames_to_copy:
+        try:
+            print(f"\n--- 处理 {frame_name} (asset_id: {asset_id}) ---")
+            
+            # 获取本地文件路径
+            source_path = get_local_file_path_from_asset_id(asset_id)
+            if not source_path:
+                print(f"⚠️  [COPY_FINAL_FRAMES] 无法获取本地文件路径，跳过")
+                continue
+            
+            # 复制文件
+            dest_filename = f"{frame_name}.jpg"
+            dest_path = final_frames_dir / dest_filename
+            shutil.copy2(source_path, dest_path) # copy2保留元数据
+            
+            print(f"✅ [COPY_FINAL_FRAMES] 已复制: {source_path} -> {dest_path}")
+            copied_files.append(str(dest_path))
+            
+        except Exception as e:
+            print(f"❌ [COPY_FINAL_FRAMES] 处理{frame_name}时出错: {e}")
+            continue
+    
+    print(f"\n{'='*80}")
+    print(f"✅ [COPY_FINAL_FRAMES] 完成! 共复制 {len(copied_files)} 个帧")
+    print(f"📁 [COPY_FINAL_FRAMES] 保存目录: {final_frames_dir}")
+    print(f"{'='*80}\n")
+    
+    return str(final_frames_dir)
+
+@tool
+async def general_video_gen(campaign_id: str, batch_id: str, prompt: str) -> str: # 生成通用视频
+    """Generate unboxing video content by extracting segments from prompt and creating video.
+    
+    Args:
+        campaign_id: Campaign UUID identifier
+        batch_id: Batch identifier (usually a number like "1")
+        prompt: Video description/script that will be analyzed into segments
+        
+    Returns:
+        Success message with extracted segments and generation details
+    """
+    print(f"\n{'='*80}")
+    print(f"🎬 [UNBOXING_VIDEO_TOOL] 工具调用开始")
+    print(f"📋 Campaign ID: {campaign_id}")
+    print(f"📋 Batch ID: {batch_id}")
+    print(f"📋 原始Prompt: {prompt}")
+    print(f"{'='*80}\n")
+    
+    try:
+        # 使用instructor提取视频分段
+        segments = await extract_video_segments(prompt)
+        
+        if not segments:
+            return "Error: Failed to extract video segments from prompt"
+        
+        # 为每个分段生成结束帧图片（所有asset_ids从segments中提取）
+        segments, prompts_info = await generate_segment_end_frames(segments, campaign_id, batch_id)
+        
+        # 复制最终帧到专用目录（重用image_service已保存的文件）
+        final_frames_dir = copy_final_frames_to_directory(campaign_id, batch_id, segments)
+        
+        # 为每个分段生成视频
+        print(f"\n{'='*80}")
+        print(f"🎬 [UNBOXING_VIDEO_TOOL] 开始生成分段视频")
+        print(f"{'='*80}\n")
+        
+        video_paths = []
+        previous_video_prompt = None # 初始化前一个分段的video prompt
+        for i, segment in enumerate(segments):
+            if not segment.first_frame or not segment.end_frame:
+                print(f"⚠️  [分段{segment.id}] 缺少帧资产，跳过视频生成")
+                continue
+            
+            try:
+                print(f"\n--- 生成分段{segment.id}视频 ---")
+                # 生成视频prompt，除第一个segment外都传入前一个segment的video prompt
+                if i == 0:
+                    video_prompt = await extract_video_prompt(segment.plot)
+                    print(f"📝 [分段{segment.id}] 视频prompt (首个分段): {video_prompt}")
+                else:
+                    video_prompt = await extract_video_prompt(segment.plot, previous_video_prompt)
+                    print(f"📝 [分段{segment.id}] 视频prompt (参考前一分段): {video_prompt}")
+                    print(f"   参考的前一分段prompt: {previous_video_prompt}")
+                
+                # 生成视频
+                video_path = await first_end_to_video(
+                    campaign_id=campaign_id,
+                    batch_id=batch_id,
+                    prompt=video_prompt,
+                    first_frame_asset_id=segment.first_frame,
+                    last_frame_asset_id=segment.end_frame,
+                    model="wan", # 使用Wan-2.1模型（默认）
+                    num_frames=81, # 默认最小帧数
+                    frames_per_second=16, # 默认16fps，约5秒视频
+                    aspect_ratio="16:9",
+                    resolution="720p",
+                    num_inference_steps=30, # 默认推理步数
+                    return_id=False,
+                    return_path=True  # 只返回本地文件路径用于拼接
+                )
+                video_paths.append(video_path)
+                previous_video_prompt = video_prompt # 更新前一个video prompt
+                print(f"✅ [分段{segment.id}] 视频生成完成: {video_path}")
+                
+            except Exception as e:
+                print(f"❌ [分段{segment.id}] 视频生成失败: {e}")
+                continue
+        
+        # 拼接所有视频
+        stitched_video_path = ""
+        if len(video_paths) > 0:
+            print(f"\n{'='*80}")
+            print(f"🎞️ [UNBOXING_VIDEO_TOOL] 开始拼接视频")
+            print(f"📋 共{len(video_paths)}个视频片段")
+            print(f"{'='*80}\n")
+            
+            try:
+                stitched_video_path = await stitch_campaign_videos(
+                    campaign_id=campaign_id,
+                    batch_id=batch_id,
+                    segment_paths=video_paths,
+                    output_filename="final_stitched.mp4"
+                )
+                print(f"✅ [UNBOXING_VIDEO_TOOL] 视频拼接完成: {stitched_video_path}")
+            except Exception as e:
+                print(f"❌ [UNBOXING_VIDEO_TOOL] 视频拼接失败: {e}")
+        
+        # 构建结果信息
+        result_lines = [
+            f"✅ Successfully extracted and generated {len(segments)} video segments:",
+            ""
+        ]
+        
+        for segment in segments:
+            result_lines.extend([
+                f"Segment {segment.id}:",
+                f"  Plot: {segment.plot}",
+                f"  First Frame Asset ID: {segment.first_frame or 'N/A'}",
+                f"  End Frame Asset ID: {segment.end_frame or 'N/A'}",
+                ""
+            ])
+        
+        result_lines.append(f"Campaign: {campaign_id}, Batch: {batch_id}")
+        result_lines.append(f"")
+        result_lines.append(f"🎞️ Final frames saved to: {final_frames_dir}")
+        result_lines.append(f"   - first_frame_segment_1.jpg (first frame of segment 1)")
+        result_lines.append(f"   - end_frame_segment_X.jpg (end frames of all segments)")
+        result_lines.append(f"")
+        
+        if video_paths:
+            result_lines.append(f"🎬 Generated {len(video_paths)} video segments")
+            for i, path in enumerate(video_paths, 1):
+                result_lines.append(f"   - Segment {i}: {path}")
+            result_lines.append(f"")
+        
+        if stitched_video_path:
+            result_lines.append(f"🎉 Final stitched video: {stitched_video_path}")
+            result_lines.append(f"")
+        
+        result_lines.append(f"{'='*80}")
+        result_lines.append(f"📝 LLM提取的图片生成Prompts:")
+        result_lines.append(f"{'='*80}")
+        
+        for key, info in prompts_info.items():
+            result_lines.append(f"")
+            result_lines.append(f"🔹 {key} ({info['type']}):")
+            result_lines.append(f"   Prompt: {info['prompt']}")
+            result_lines.append(f"   Asset IDs: {info['asset_ids']}")
+        
+        result_msg = "\n".join(result_lines)
+        
+        print(f"🎉 [UNBOXING_VIDEO_TOOL] 视频分段生成完成!")
+        print(f"{'='*80}\n")
+        
+        return result_msg
+        
+    except Exception as e:
+        error_msg = f"General video generation failed: {e}"
+        print(f"❌ [UNBOXING_VIDEO_TOOL] 错误: {error_msg}")
+        return error_msg
+

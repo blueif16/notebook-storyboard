@@ -1,17 +1,17 @@
 from fastapi import APIRouter, HTTPException, status
 from typing import List
 
-from app.models import StoredStorybook, StorybookCreate
+from app.models import StoredAsset, Story
 from app.controllers import storybook_controller
 
 router = APIRouter()
 
 
-@router.post("/", response_model=StoredStorybook, status_code=status.HTTP_201_CREATED)
-async def create_storybook(storybook_data: StorybookCreate):
+@router.post("/", response_model=StoredAsset, status_code=status.HTTP_201_CREATED)
+async def create_storybook(title: str, story: Story, source_titles: List[str] = None):
     """Create a new storybook"""
     try:
-        return storybook_controller.create_storybook(storybook_data)
+        return storybook_controller.create_storybook(title, story, source_titles)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -19,7 +19,7 @@ async def create_storybook(storybook_data: StorybookCreate):
         )
 
 
-@router.get("/", response_model=List[StoredStorybook])
+@router.get("/", response_model=List[StoredAsset])
 async def get_all_storybooks():
     """Get all storybooks"""
     try:
@@ -31,7 +31,7 @@ async def get_all_storybooks():
         )
 
 
-@router.get("/{storybook_id}", response_model=StoredStorybook)
+@router.get("/{storybook_id}", response_model=StoredAsset)
 async def get_storybook(storybook_id: str):
     """Get a specific storybook by ID"""
     storybook = storybook_controller.get_storybook_by_id(storybook_id)

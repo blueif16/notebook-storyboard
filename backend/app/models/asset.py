@@ -1,23 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Any, Literal
-from datetime import datetime
-
-
-class StoryPage(BaseModel):
-    leftImage: Optional[str] = None
-    rightImage: Optional[str] = None
-    leftText: Optional[str] = None
-    rightText: Optional[str] = None
-    imagePrompt: Optional[str] = None
-
-
-class StoredStorybook(BaseModel):
-    id: str
-    title: str
-    pages: list[StoryPage]
-    createdAt: int
-    sourceCount: int
-    sourceTitles: list[str]
+from .story import Story
 
 
 class AssetMetadata(BaseModel):
@@ -39,9 +22,3 @@ class AssetCreate(BaseModel):
     title: str
     data: Any
     metadata: Optional[AssetMetadata] = None
-
-
-class StorybookCreate(BaseModel):
-    title: str
-    pages: list[StoryPage]
-    sourceTitles: list[str] = Field(default_factory=list)

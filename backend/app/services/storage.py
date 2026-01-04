@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-from app.models import StoredAsset, StoredStorybook, StoryPage, AssetMetadata
+from app.models import StoredAsset, Story, AssetMetadata
 
 
 class StorageService:
@@ -79,48 +79,37 @@ class StorageService:
     def save_storybook(
         self,
         title: str,
-        pages: list[StoryPage],
+        story: Story,
         source_titles: list[str] = None
-    ) -> StoredStorybook:
+    ) -> StoredAsset:
         """Save a storybook and return it"""
         if source_titles is None:
             source_titles = []
 
-        storybook = StoredStorybook(
-            id=f"storybook-{int(datetime.now().timestamp() * 1000)}",
-            title=title,
-            pages=pages,
-            createdAt=int(datetime.now().timestamp() * 1000),
-            sourceCount=len(source_titles),
-            sourceTitles=source_titles
-        )
-
-        # Save as generic asset
         asset = StoredAsset(
-            id=storybook.id,
+            id=f"storybook-{int(datetime.now().timestamp() * 1000)}",
             type="storybook",
-            title=storybook.title,
-            createdAt=storybook.createdAt,
-            data=storybook.model_dump(),
+            title=title,
+            createdAt=int(datetime.now().timestamp() * 1000),
+            data=story.model_dump(),
             metadata=AssetMetadata(
-                sourceCount=storybook.sourceCount,
-                sourceTitles=storybook.sourceTitles
+                sourceCount=len(source_titles),
+                sourceTitles=source_titles
             )
         )
 
         self.save_asset(asset)
-        return storybook
+        return asset
 
-    def get_all_storybooks(self) -> list[StoredStorybook]:
+    def get_all_storybooks(self) -> list[StoredAsset]:
         """Get all storybooks"""
-        assets = self.get_assets_by_type("storybook")
-        return [StoredStorybook(**asset.data) for asset in assets]
+        return self.get_assets_by_type("storybook")
 
-    def get_storybook_by_id(self, storybook_id: str) -> Optional[StoredStorybook]:
+    def get_storybook_by_id(self, storybook_id: str) -> Optional[StoredAsset]:
         """Get a specific storybook by ID"""
         asset = self.get_asset_by_id(storybook_id)
         if asset and asset.type == "storybook":
-            return StoredStorybook(**asset.data)
+            return asset
         return None
 
 

@@ -1,17 +1,19 @@
 from .asset import (
     StoredAsset,
-    StoredStorybook,
-    StoryPage,
     AssetCreate,
-    StorybookCreate,
     AssetMetadata
+)
+from .story import (
+    Character,
+    StoryPage,
+    Story
 )
 
 __all__ = [
     "StoredAsset",
-    "StoredStorybook",
-    "StoryPage",
     "AssetCreate",
-    "StorybookCreate",
-    "AssetMetadata"
+    "AssetMetadata",
+    "Character",
+    "StoryPage",
+    "Story"
 ]

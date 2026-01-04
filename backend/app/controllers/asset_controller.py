@@ -3,10 +3,8 @@ from datetime import datetime
 
 from app.models import (
     StoredAsset,
-    StoredStorybook,
     AssetCreate,
-    StorybookCreate,
-    StoryPage,
+    Story,
     AssetMetadata
 )
 from app.services import storage_service
@@ -53,19 +51,19 @@ class StorybookController:
     def __init__(self):
         self.storage = storage_service
 
-    def create_storybook(self, storybook_data: StorybookCreate) -> StoredStorybook:
+    def create_storybook(self, title: str, story: Story, source_titles: list[str] = None) -> StoredAsset:
         """Create a new storybook"""
         return self.storage.save_storybook(
-            title=storybook_data.title,
-            pages=storybook_data.pages,
-            source_titles=storybook_data.sourceTitles
+            title=title,
+            story=story,
+            source_titles=source_titles or []
         )
 
-    def get_all_storybooks(self) -> list[StoredStorybook]:
+    def get_all_storybooks(self) -> list[StoredAsset]:
         """Get all storybooks"""
         return self.storage.get_all_storybooks()
 
-    def get_storybook_by_id(self, storybook_id: str) -> Optional[StoredStorybook]:
+    def get_storybook_by_id(self, storybook_id: str) -> Optional[StoredAsset]:
         """Get storybook by ID"""
         return self.storage.get_storybook_by_id(storybook_id)
 

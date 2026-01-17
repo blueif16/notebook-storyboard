@@ -1,8 +1,8 @@
 """Google Gemini图像生成服务"""
 import httpx
+from pathlib import Path
 from typing import Optional, List, Union, Any
 from datetime import datetime
-from dotenv import load_dotenv
 from ..config import (
     GOOGLE_API_KEY,
     GOOGLE_DEFAULT_MODEL,
@@ -13,8 +13,6 @@ from .storage_service import (
     save_image_to_supabase,
     _init_supabase
 )
-
-load_dotenv()
 
 
 class GoogleImageService:
@@ -39,8 +37,8 @@ class GoogleImageService:
             f"?key={self.api_key}"
         )
 
-        # 构建请求内容
-        contents = [{"text": prompt}]
+        # 构建请求内容 - parts 数组
+        parts = [{"text": prompt}]
 
         # 添加参考图像
         if image_urls:
@@ -49,14 +47,17 @@ class GoogleImageService:
                     img_resp = await client.get(img_url)
                     import base64
                     img_b64 = base64.b64encode(img_resp.content).decode()
-                    contents.append({
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
+                    parts.append({
+                        "inlineData": {
+                            "mimeType": "image/jpeg",
                             "data": img_b64
                         }
                     })
 
-        payload: dict[str, Any] = {"contents": [{"parts": contents}]}
+        # 构建 payload
+        payload: dict[str, Any] = {
+            "contents": [{"parts": parts}]
+        }
 
         # 添加生成配置
         generation_config: dict[str, Any] = {
@@ -76,6 +77,8 @@ class GoogleImageService:
 
         print(f"📤 [GOOGLE_IMAGE_API] 调用模型: {model}")
         print(f"📤 [GOOGLE_IMAGE_API] Prompt长度: {len(prompt)}")
+        if image_urls:
+            print(f"📤 [GOOGLE_IMAGE_API] 参考图片数量: {len(image_urls)}")
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(url, json=payload)
@@ -97,31 +100,42 @@ class GoogleImageService:
     ) -> Optional[bytes]:
         """从响应中提取图像数据"""
         try:
+            print(f"🔍 [DEBUG] 响应结构: {list(response.keys())}")
             candidates = response.get("candidates", [])
             if not candidates:
                 print("⚠️  [GOOGLE_IMAGE_API] 响应中无candidates")
+                print(f"🔍 [DEBUG] 完整响应: {response}")
                 return None
 
+            print(f"🔍 [DEBUG] Candidates数量: {len(candidates)}")
             parts = candidates[0].get("content", {}).get("parts", [])
+            print(f"🔍 [DEBUG] Parts数量: {len(parts)}")
 
-            for part in parts:
-                if "inline_data" in part:
+            for i, part in enumerate(parts):
+                print(f"🔍 [DEBUG] Part {i} keys: {list(part.keys())}")
+                # Try both camelCase and snake_case
+                inline_data = part.get("inline_data") or part.get("inlineData")
+                if inline_data:
                     import base64
-                    img_data = part["inline_data"].get("data")
+                    img_data = inline_data.get("data")
                     if img_data:
+                        print(f"✅ [DEBUG] 找到图像数据，长度: {len(img_data)}")
                         return base64.b64decode(img_data)
 
             print("⚠️  [GOOGLE_IMAGE_API] 未找到图像数据")
             return None
         except Exception as e:
             print(f"❌ [GOOGLE_IMAGE_API] 提取图像失败: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
 
 async def google_text_to_image(
     prompt: str,
-    model: str = "gemini-2.5-flash-image",
-    return_id: bool = False
+    model: str = "gemini-3-pro-image-preview",
+    return_id: bool = False,
+    local_save_path: Optional[str] = None
 ) -> str:
     """文本生成图像
 
@@ -129,6 +143,7 @@ async def google_text_to_image(
         prompt: 图像生成提示词
         model: 使用的模型，默认 "gemini-2.5-flash-image"
         return_id: 是否只返回 asset_id
+        local_save_path: 可选的本地保存路径（如果提供，会额外保存到该路径）
 
     Returns:
         str: asset_id 或完整结果信息
@@ -151,6 +166,15 @@ async def google_text_to_image(
         if not image_data:
             raise RuntimeError("未能从响应中提取图像数据")
 
+        # 如果提供了本地保存路径，先保存到本地
+        if local_save_path:
+            print(f"💾 [GOOGLE_TEXT_TO_IMAGE] 保存到本地: {local_save_path}")
+            local_path = Path(local_save_path)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(image_data)
+            print(f"✅ [GOOGLE_TEXT_TO_IMAGE] 本地保存成功")
+
         print("💾 [GOOGLE_TEXT_TO_IMAGE] 保存图像...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"google_image_{timestamp}.jpg"
@@ -169,7 +193,7 @@ async def google_text_to_image(
                 try:
                     print("🔍 [GOOGLE_TEXT_TO_IMAGE] 查询asset_id...")
                     db_resp = (
-                        supabase.table("user_files")
+                        supabase.table("user_images")
                         .select("id")
                         .eq("storage_path", storage_path)
                         .single()
@@ -206,16 +230,17 @@ async def google_text_to_image(
     except Exception as e:
         error = f"Google text-to-image generation failed: {e}"
         print(f"❌ [GOOGLE_TEXT_TO_IMAGE] 错误: {error}")
-        return error
+        raise RuntimeError(error) from e
 
 
 async def google_image_to_image(
     prompt: str,
     image_asset_ids: Union[str, List[str]],
-    model: str = "gemini-2.5-flash-image",
+    model: str = "gemini-3-pro-image-preview",
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
-    return_id: bool = False
+    return_id: bool = False,
+    local_save_path: Optional[str] = None
 ) -> str:
     """图像编辑（基于参考图像生成新图像）
 
@@ -226,6 +251,7 @@ async def google_image_to_image(
         aspect_ratio: 图像宽高比，如 "16:9", "1:1" 等，默认使用配置文件设置
         resolution: 图像分辨率，如 "1K", "2K", "4K"，默认使用配置文件设置
         return_id: 是否只返回 asset_id
+        local_save_path: 可选的本地保存路径（如果提供，会额外保存到该路径）
 
     Returns:
         str: asset_id 或完整结果信息
@@ -251,13 +277,18 @@ async def google_image_to_image(
         print(f"🔍 [GOOGLE_IMAGE_TO_IMAGE] 获取{len(asset_id_list)}张参考图片URL...")
         ref_image_urls = []
         for asset_id in asset_id_list:
+            print(f"  - 获取 asset_id: {asset_id}")
             url = await get_image_url_from_asset_id(asset_id)
             if not url:
                 raise RuntimeError(f"无法获取asset_id={asset_id}的URL")
             ref_image_urls.append(url)
+            print(f"  - URL长度: {len(url)}")
         print(f"✅ [GOOGLE_IMAGE_TO_IMAGE] {len(ref_image_urls)}张参考图片URL获取成功")
 
         print("🚀 [GOOGLE_IMAGE_TO_IMAGE] 调用Google Gemini API...")
+        print(f"  - Prompt: {prompt[:100]}...")
+        print(f"  - Aspect ratio: {aspect_ratio or GOOGLE_DEFAULT_ASPECT_RATIO}")
+        print(f"  - Resolution: {resolution or GOOGLE_DEFAULT_RESOLUTION}")
         response = await service._call_gemini_api(
             model, prompt, image_urls=ref_image_urls,
             aspect_ratio=aspect_ratio or GOOGLE_DEFAULT_ASPECT_RATIO,
@@ -269,6 +300,15 @@ async def google_image_to_image(
 
         if not image_data:
             raise RuntimeError("未能从响应中提取图像数据")
+
+        # 如果提供了本地保存路径，先保存到本地
+        if local_save_path:
+            print(f"💾 [GOOGLE_IMAGE_TO_IMAGE] 保存到本地: {local_save_path}")
+            local_path = Path(local_save_path)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(local_path, "wb") as f:
+                f.write(image_data)
+            print(f"✅ [GOOGLE_IMAGE_TO_IMAGE] 本地保存成功")
 
         print("💾 [GOOGLE_IMAGE_TO_IMAGE] 保存图像...")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -288,7 +328,7 @@ async def google_image_to_image(
                 try:
                     print("🔍 [GOOGLE_IMAGE_TO_IMAGE] 查询asset_id...")
                     db_resp = (
-                        supabase.table("user_files")
+                        supabase.table("user_images")
                         .select("id")
                         .eq("storage_path", storage_path)
                         .single()
@@ -329,4 +369,4 @@ async def google_image_to_image(
     except Exception as e:
         error = f"Google image-to-image generation failed: {e}"
         print(f"❌ [GOOGLE_IMAGE_TO_IMAGE] 错误: {error}")
-        return error
+        raise RuntimeError(error) from e

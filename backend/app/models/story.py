@@ -7,6 +7,7 @@ class Character(BaseModel):
     name: str
     description: str
     image_id: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class StoryPage(BaseModel):
@@ -16,9 +17,11 @@ class StoryPage(BaseModel):
     character_names: List[str]
     reference_page_numbers: List[int]
     generated_image_id: Optional[str] = None
+    generated_image_url: Optional[str] = None
 
 
 class Story(BaseModel):
     """故事脚本"""
+    story_id: Optional[str] = None  # 故事唯一ID
     characters: List[Character]
     pages: List[StoryPage]

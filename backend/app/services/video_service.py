@@ -16,7 +16,10 @@ from .storage_service import (
 )
 from .image_service import fal_subscribe
 
-load_dotenv()
+# Load .env from parent folder (project root)
+parent_dir = Path(__file__).resolve().parent.parent.parent.parent
+env_path = parent_dir / ".env"
+load_dotenv(dotenv_path=env_path)
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +103,7 @@ async def video_gen_service(
                     try:
                         print("🔍 [VIDEO_GEN_SERVICE] 查询asset_id...")
                         db_resp = (
-                            supabase.table("user_files")
+                            supabase.table("user_images")
                             .select("id")
                             .eq("storage_path", storage_path)
                             .single()
@@ -358,7 +361,7 @@ async def first_end_to_video(
                     try:
                         print("🔍 [FIRST_END_TO_VIDEO] 查询asset_id...")
                         db_resp = (
-                            supabase.table("user_files")
+                            supabase.table("user_images")
                             .select("id")
                             .eq("storage_path", storage_path)
                             .single()

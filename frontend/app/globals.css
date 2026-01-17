@@ -73,3 +73,6 @@
 .react-flow__attribution {
   display: none !important;
 }
+
+/* Import Storybook Animations */
+@import '../styles/storybook-animations.css';

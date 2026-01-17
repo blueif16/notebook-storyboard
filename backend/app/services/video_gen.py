@@ -31,7 +31,10 @@ from .video_service import (
     first_end_to_video
 )
 
-load_dotenv()
+# Load .env from parent folder (project root)
+parent_dir = Path(__file__).resolve().parent.parent.parent.parent
+env_path = parent_dir / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)

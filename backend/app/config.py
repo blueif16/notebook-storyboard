@@ -1,9 +1,13 @@
 """统一配置文件 - 管理所有服务配置"""
 import os
+from pathlib import Path
 from typing import Literal
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from parent folder (project root)
+parent_dir = Path(__file__).resolve().parent.parent.parent
+env_path = parent_dir / ".env"
+load_dotenv(dotenv_path=env_path)
 
 # ============================================
 # 图片生成服务配置
@@ -18,10 +22,13 @@ DEFAULT_IMAGE_SERVICE: ImageServiceType = os.getenv(
 # Google Image Service 配置
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_DEFAULT_MODEL = os.getenv(
-    "GOOGLE_DEFAULT_MODEL", "gemini-2.5-flash-image"
+    "GOOGLE_DEFAULT_MODEL", "gemini-3-pro-image-preview"
 )
 GOOGLE_DEFAULT_ASPECT_RATIO = os.getenv("GOOGLE_DEFAULT_ASPECT_RATIO", "16:9")
 GOOGLE_DEFAULT_RESOLUTION = os.getenv("GOOGLE_DEFAULT_RESOLUTION", "2K")
+
+# Gemini 文字模型配置（用于所有文本生成）
+GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3-flash-preview")
 
 # FAL AI 配置
 FAL_API_KEY = os.getenv("FAL_API_KEY")
@@ -37,9 +44,13 @@ DEFAULT_STORAGE_SERVICE: StorageServiceType = os.getenv(
     "DEFAULT_STORAGE_SERVICE", "supabase"
 ).lower()
 
-# Supabase 配置
+# Supabase 配置 (使用新的 secret key 格式: sb_secret_...)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SECRET_KEY")
+
+# 向后兼容：如果没有设置新的 SECRET_KEY，尝试使用旧的 SERVICE_KEY
+if not SUPABASE_SECRET_KEY:
+    SUPABASE_SECRET_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 # 本地存储配置
 BASE_DIR = os.getenv("BASE_DIR", "generated_files")
@@ -93,9 +104,9 @@ def validate_config():
     if DEFAULT_STORAGE_SERVICE == "supabase":
         if not SUPABASE_URL:
             errors.append("SUPABASE_URL 未配置，但默认存储服务设置为 supabase")
-        if not SUPABASE_SERVICE_KEY:
+        if not SUPABASE_SECRET_KEY:
             errors.append(
-                "SUPABASE_SERVICE_KEY 未配置，但默认存储服务设置为 supabase"
+                "SUPABASE_SECRET_KEY 未配置，但默认存储服务设置为 supabase"
             )
 
     if errors:

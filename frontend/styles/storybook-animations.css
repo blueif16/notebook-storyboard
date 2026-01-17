@@ -1,0 +1,78 @@
+/* Storybook Animations */
+
+/* Wobbly float - for decorative elements */
+@keyframes wobble-float {
+  0%, 100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  25% {
+    transform: translateY(-8px) rotate(2deg);
+  }
+  75% {
+    transform: translateY(5px) rotate(-2deg);
+  }
+}
+
+/* Gentle pulse - for glows and highlights */
+@keyframes gentle-pulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.05);
+  }
+}
+
+/* Twinkle - for stars */
+@keyframes twinkle {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.8);
+  }
+}
+
+/* Hand-drawn path animation */
+@keyframes draw-path {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* Apply to elements */
+.floating-decoration {
+  animation: wobble-float 4s ease-in-out infinite;
+}
+
+.star-decoration {
+  animation: twinkle 2s ease-in-out infinite;
+  animation-delay: var(--delay, 0s);
+}
+
+.glow-effect {
+  animation: gentle-pulse 3s ease-in-out infinite;
+}
+
+/* Wobbly border effect */
+.wobbly-border {
+  position: relative;
+  border-radius: 1.5rem;
+}
+
+.wobbly-border::before {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 1.5rem;
+  padding: 2px;
+  background: linear-gradient(45deg, #8B7355, #D4A03D, #7B9E89, #C17C74);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}

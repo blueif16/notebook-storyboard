@@ -94,19 +94,19 @@ python app/main.py
 
 The backend API will be available at `http://localhost:8000`
 
+## Documentation
+
+For detailed documentation, see the [docs/](docs/) folder:
+- [Setup & Configuration](docs/setup/CONFIGURATION.md) - Environment setup guide
+- [Database Setup](docs/database/SUPABASE_MIGRATION.md) - Supabase configuration
+- [Libraries](docs/libraries/) - Third-party integrations
+- [Full Documentation Index](docs/README.md) - Complete documentation structure
+
 ## Environment Variables
 
-### Frontend (.env.local)
-```
-GEMINI_API_KEY=your_gemini_api_key
-OPENAI_API_KEY=your_openai_api_key
-HYPERBROWSER_API_KEY=your_hyperbrowser_api_key
-```
+See the [Configuration Guide](docs/setup/CONFIGURATION.md) for detailed setup instructions.
 
-### Backend (.env)
-```
-# Add backend-specific environment variables here
-```
+Quick start: Copy `.env.example` to `.env` and add your API keys.
 
 ## Usage
 

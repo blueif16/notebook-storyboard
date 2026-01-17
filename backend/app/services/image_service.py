@@ -20,7 +20,10 @@ from .storage_service import (
     _init_supabase
 )
 
-load_dotenv()
+# Load .env from parent folder (project root)
+parent_dir = Path(__file__).resolve().parent.parent.parent.parent
+env_path = parent_dir / ".env"
+load_dotenv(dotenv_path=env_path)
 
 async def fal_subscribe(endpoint: str, args: dict) -> dict:
     """订阅FAL任务并等待结果"""
@@ -143,7 +146,7 @@ async def image_gen_service(
                 try:
                     print("🔍 [IMAGE_GEN_SERVICE] 查询asset_id...")
                     db_resp = (
-                        supabase.table("user_files")
+                        supabase.table("user_images")
                         .select("id")
                         .eq("storage_path", storage_path)
                         .single()
@@ -299,7 +302,7 @@ async def image_to_image_gen_service(
                 try:
                     print("🔍 [IMAGE_TO_IMAGE_SERVICE] 查询asset_id...")
                     db_resp = (
-                        supabase.table("user_files")
+                        supabase.table("user_images")
                         .select("id")
                         .eq("storage_path", storage_path)
                         .single()

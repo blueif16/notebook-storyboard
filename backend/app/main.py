@@ -1,10 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from parent folder (project root)
+parent_dir = Path(__file__).resolve().parent.parent.parent
+env_path = parent_dir / ".env"
+load_dotenv(dotenv_path=env_path)
 
 app = FastAPI(
     title="HyperBookLM Backend API",

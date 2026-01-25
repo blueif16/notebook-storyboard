@@ -1,10 +1,12 @@
-export { LandingPage } from './LandingPage';
-export { StyleConfigPage } from './StyleConfigPage';
-export { BriefInputPage } from './BriefInputPage';
-export { GenerationLoading } from './GenerationLoading';
-export { CharacterApproval } from './CharacterApproval';
-export { StoryReader } from './StoryReader';
-export { StorybookFlow } from './StorybookFlow';
-export { FloatingDecorations } from './FloatingDecorations';
+// Agent-based storybook components
+export { CharacterGrid } from './CharacterGrid';
+export { PageGrid } from './PageGrid';
 export { ProgressIndicator } from './ProgressIndicator';
+export { InterruptCard } from './InterruptCard';
+
+// Keep existing reader component
+export { StoryReader } from './StoryReader';
+
+// Keep utility components
+export { FloatingDecorations } from './FloatingDecorations';
 export { WobblyButton } from './WobblyButton';

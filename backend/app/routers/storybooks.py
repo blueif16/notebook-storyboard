@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 from app.models import StoredAsset, Story, Character
@@ -8,6 +8,9 @@ from app.services.storybook_gen_modular import (
     generate_characters_only,
     generate_story_from_characters
 )
+
+# Agent-based generation
+from app.graphs import run_storybook_generation
 
 router = APIRouter()
 
@@ -116,4 +119,75 @@ async def delete_storybook(storybook_id: str):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Storybook with ID {storybook_id} not found"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# AGENT-BASED GENERATION (New Architecture)
+# ═══════════════════════════════════════════════════════════════════════
+
+class AgentGenerateRequest(BaseModel):
+    """Request for agent-based storybook generation."""
+    story_text: str
+    style: Optional[str] = "whimsical"
+    page_count: Optional[int] = None
+
+
+class AgentGenerateResponse(BaseModel):
+    """Response from agent-based generation."""
+    storybook_id: str
+    title: str
+    characters_count: int
+    pages_count: int
+    characters: List[dict]
+    pages: List[dict]
+
+
+@router.post("/agent-generate", response_model=AgentGenerateResponse)
+async def agent_generate_storybook(request: AgentGenerateRequest):
+    """
+    Generate complete storybook using agent-based architecture.
+    
+    This is the NEW unified endpoint that replaces the 2-phase flow.
+    Agents handle enhancement, character gen, page gen, and save automatically.
+    
+    Flow:
+    1. Orchestrator enhances story and generates characters
+    2. Story Generator creates illustrated pages sequentially
+    3. Auto-saves to database
+    
+    Returns complete storybook data.
+    """
+    try:
+        # Build user message with preferences
+        user_message = request.story_text
+        if request.style:
+            user_message += f"\n\nStyle preference: {request.style}"
+        if request.page_count:
+            user_message += f"\n\nCreate {request.page_count} pages."
+        
+        # Run agent pipeline
+        result = await run_storybook_generation(
+            user_input=user_message,
+            thread_id=None  # New conversation each time
+        )
+        
+        # Extract results from state
+        storybook_id = result.get("storybook_id")
+        if not storybook_id:
+            raise RuntimeError("Pipeline completed but no storybook_id found")
+        
+        return AgentGenerateResponse(
+            storybook_id=storybook_id,
+            title=result.get("title", "Untitled Story"),
+            characters_count=len(result.get("characters", [])),
+            pages_count=len(result.get("pages", [])),
+            characters=result.get("characters", []),
+            pages=result.get("pages", []),
+        )
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Agent-based generation failed: {str(e)}"
         )

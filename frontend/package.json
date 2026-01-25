@@ -10,7 +10,11 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.32.1",
+    "@ag-ui/client": "0.0.42",
+    "@anthropic-ai/sdk": "^0.57.0",
+    "@copilotkit/react-core": "^1.51.2",
+    "@copilotkit/react-ui": "^1.51.2",
+    "@copilotkit/runtime": "^1.51.2",
     "@google/genai": "^1.33.0",
     "@google/generative-ai": "^0.24.1",
     "@hyperbrowser/sdk": "^0.79.0",
@@ -44,5 +48,8 @@
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
     "typescript": "^5"
+  },
+  "overrides": {
+    "@ag-ui/client": "0.0.42"
   }
 }

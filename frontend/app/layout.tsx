@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { DM_Mono, Manrope } from "next/font/google";
 import "./globals.css";
+import "@copilotkit/react-ui/styles.css";
 import { Toaster } from "@/components/ui/toaster";
+import { CopilotKit } from "@copilotkit/react-core";
 
 const manrope = Manrope({
   subsets: ["latin"],
@@ -33,8 +35,10 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={`${manrope.variable} ${dmMono.variable}`}>
-        {children}
-        <Toaster />
+        <CopilotKit runtimeUrl="/api/copilotkit" agent="storybookAgent">
+          {children}
+          <Toaster />
+        </CopilotKit>
       </body>
     </html>
   );

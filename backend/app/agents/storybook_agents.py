@@ -1,17 +1,26 @@
 """Storybook Agents"""
 from langgraph.prebuilt import create_react_agent
-from google import genai
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..config import GOOGLE_API_KEY, GEMINI_TEXT_MODEL
 from ..tools import ORCHESTRATOR_TOOLS, STORY_GENERATOR_TOOLS
 
 
+def get_gemini_model():
+    """Get LangChain-compatible Gemini model."""
+    return ChatGoogleGenerativeAI(
+        model=GEMINI_TEXT_MODEL,
+        google_api_key=GOOGLE_API_KEY,
+        temperature=0.7,
+    )
+
+
 def create_orchestrator_agent():
     """Main agent: handles chat, character prep, delegation."""
-    client = genai.Client(api_key=GOOGLE_API_KEY)
+    model = get_gemini_model()
     
     return create_react_agent(
-        model=client.models.get(GEMINI_TEXT_MODEL),
+        model=model,
         tools=ORCHESTRATOR_TOOLS,
         name="orchestrator",
         prompt="""You are a storybook creator. User describes a story, you make it.
@@ -33,10 +42,10 @@ NO FIXED FLOW. Adapt to conversation."""
 
 def create_story_generator_agent():
     """Sequential page illustrator with dynamic references."""
-    client = genai.Client(api_key=GOOGLE_API_KEY)
+    model = get_gemini_model()
     
     return create_react_agent(
-        model=client.models.get(GEMINI_TEXT_MODEL),
+        model=model,
         tools=STORY_GENERATOR_TOOLS,
         name="story_generator",
         prompt="""You are a storybook illustrator creating pages sequentially.

@@ -1,12 +1,18 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useCoAgent, useCoAgentStateRender, useLangGraphInterrupt } from "@copilotkit/react-core";
-import { CopilotChat } from "@copilotkit/react-ui";
 import { StorybookState, initialStorybookState, UserInputInterrupt } from "@/types/storybook-state";
-import { CharacterGrid } from "@/components/storybook/CharacterGrid";
-import { PageGrid } from "@/components/storybook/PageGrid";
-import { ProgressIndicator } from "@/components/storybook/ProgressIndicator";
-import { InterruptCard } from "@/components/storybook/InterruptCard";
+
+// Lazy load heavy components for faster initial page load
+const CopilotChat = dynamic(
+  () => import("@copilotkit/react-ui").then((mod) => mod.CopilotChat),
+  { ssr: false }
+);
+const CharacterGrid = dynamic(() => import("@/components/storybook/CharacterGrid").then((mod) => mod.CharacterGrid));
+const PageGrid = dynamic(() => import("@/components/storybook/PageGrid").then((mod) => mod.PageGrid));
+const ProgressIndicator = dynamic(() => import("@/components/storybook/ProgressIndicator").then((mod) => mod.ProgressIndicator));
+const InterruptCard = dynamic(() => import("@/components/storybook/InterruptCard").then((mod) => mod.InterruptCard));
 
 export default function StorybookPage() {
   const { state } = useCoAgent<StorybookState>({

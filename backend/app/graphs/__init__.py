@@ -1,15 +1,17 @@
+"""Graphs Module - V2 Architecture"""
+
 from .storybook_graph import (
     build_storybook_graph,
     compile_storybook_graph,
-    run_storybook_generation,
+    get_graph,
     StorybookState,
-    create_initial_state,
+    run_storybook_generation,
 )
 
 __all__ = [
     "build_storybook_graph",
     "compile_storybook_graph",
-    "run_storybook_generation",
+    "get_graph",
     "StorybookState",
-    "create_initial_state",
+    "run_storybook_generation",
 ]

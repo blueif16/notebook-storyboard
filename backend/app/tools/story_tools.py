@@ -1,82 +1,107 @@
-"""Story Tools for Agent-Based Storybook Generation"""
-from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
-from langchain_core.tools import tool
-from langgraph.types import interrupt
-import instructor
+"""Story Tools for V2 Agent System
 
-from ..config import GOOGLE_API_KEY, GEMINI_TEXT_MODEL
+Functional tools only - no HITL tools here.
+HITL tools moved to hitl_tools.py
+"""
+from typing import List, Dict, Any
+from langchain_core.tools import tool
+
 from ..services.google_image_service import google_text_to_image, google_image_to_image
 from ..services.storage_service import get_image_url_from_asset_id
 
 
-@tool
-async def enhance_and_extract(story_text: str) -> Dict[str, Any]:
-    """Enhance story for visual generation and extract characters."""
-    client = instructor.from_provider(f"google/{GEMINI_TEXT_MODEL}", api_key=GOOGLE_API_KEY)
-    
-    class CharacterInfo(BaseModel):
-        name: str
-        description: str = Field(description="Detailed physical description")
-    
-    class Result(BaseModel):
-        enhanced_story: str
-        characters: List[CharacterInfo]
-    
-    result = client.chat.completions.create(
-        response_model=Result,
-        messages=[{
-            "role": "user",
-            "content": f"""Enhance this story for illustration and extract characters:
-
-{story_text}
-
-Tasks:
-1. enhanced_story: Add visual details (character appearances, scene descriptions, settings)
-2. characters: Extract all characters with detailed physical descriptions
-
-Output in English."""
-        }]
-    )
-    
-    return {
-        "enhanced_story": result.enhanced_story,
-        "characters": [{"name": c.name, "description": c.description} for c in result.characters]
-    }
-
+# =============================================================================
+# FUNCTIONAL TOOLS (External API calls)
+# =============================================================================
 
 @tool
-async def generate_character_portrait(description: str, character_name: str = "") -> Dict[str, str]:
-    """Generate character portrait, auto-saves to Supabase."""
+async def generate_character_portrait(
+    description: str, 
+    character_name: str = ""
+) -> Dict[str, str]:
+    """
+    Generate character portrait image, auto-saves to Supabase.
+    
+    Args:
+        description: Detailed physical description of the character
+        character_name: Name for reference
+        
+    Returns:
+        Dict with name, image_id, and image_url
+    """
     prompt = f"Character portrait: {description}. Studio lighting, white background, full body shot. No text, no distortions."
     
     image_id = await google_text_to_image(prompt=prompt, return_id=True)
     image_url = await get_image_url_from_asset_id(image_id)
     
-    return {"image_id": image_id, "image_url": image_url}
+    return {
+        "name": character_name,
+        "image_id": image_id, 
+        "image_url": image_url
+    }
 
 
 @tool
-async def generate_page_image(prompt: str, reference_image_ids: List[str], page_number: int = 0) -> Dict[str, str]:
-    """Generate storybook page with references, auto-saves to Supabase."""
+async def generate_page_image(
+    prompt: str, 
+    reference_image_ids: List[str], 
+    page_number: int = 0
+) -> Dict[str, str]:
+    """
+    Generate storybook page image with character/scene references.
+    
+    Args:
+        prompt: Scene description for the page
+        reference_image_ids: Character image IDs for visual consistency
+        page_number: Page number in the storybook
+        
+    Returns:
+        Dict with image_id, image_url, and page_number
+    """
     enhanced_prompt = f"{prompt}. Consistent style, professional composition. No text, no distortions, no watermarks."
     
+    # Limit references to 14 (API constraint)
     if len(reference_image_ids) > 14:
         reference_image_ids = reference_image_ids[:14]
     
     if reference_image_ids:
-        image_id = await google_image_to_image(prompt=enhanced_prompt, image_asset_ids=reference_image_ids, return_id=True)
+        image_id = await google_image_to_image(
+            prompt=enhanced_prompt, 
+            image_asset_ids=reference_image_ids, 
+            return_id=True
+        )
     else:
-        image_id = await google_text_to_image(prompt=enhanced_prompt, return_id=True)
+        image_id = await google_text_to_image(
+            prompt=enhanced_prompt, 
+            return_id=True
+        )
     
     image_url = await get_image_url_from_asset_id(image_id)
     
-    return {"image_id": image_id, "image_url": image_url}
+    return {
+        "image_id": image_id, 
+        "image_url": image_url, 
+        "page_number": page_number
+    }
 
 
 @tool
-async def save_storybook(title: str, description: str, pages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Save complete storybook to database."""
+async def save_storybook(
+    title: str, 
+    description: str, 
+    pages: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """
+    Save complete storybook to database.
+    
+    Args:
+        title: Storybook title
+        description: Brief description
+        pages: List of page dicts with image_id, image_url, page_number
+        
+    Returns:
+        Dict with storybook_id, saved status, and page_count
+    """
     from ..services.storage_service import _init_supabase
     import uuid
     from datetime import datetime
@@ -87,7 +112,7 @@ async def save_storybook(title: str, description: str, pages: List[Dict[str, Any
     
     storybook_id = str(uuid.uuid4())
     
-    result = supabase.table("storybooks").insert({
+    supabase.table("storybooks").insert({
         "id": storybook_id,
         "title": title,
         "description": description,
@@ -96,16 +121,8 @@ async def save_storybook(title: str, description: str, pages: List[Dict[str, Any
         "created_at": datetime.utcnow().isoformat(),
     }).execute()
     
-    return {"storybook_id": storybook_id, "saved": True, "page_count": len(pages)}
-
-
-@tool
-def request_user_input(question: str, images: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    """Request input from user with optional image display."""
-    response = interrupt({"type": "user_input", "question": question, "images": images or []})
-    return response
-
-
-ORCHESTRATOR_TOOLS = [enhance_and_extract, generate_character_portrait, request_user_input]
-STORY_GENERATOR_TOOLS = [generate_page_image, save_storybook, request_user_input]
-ALL_STORY_TOOLS = [enhance_and_extract, generate_character_portrait, generate_page_image, save_storybook, request_user_input]
+    return {
+        "storybook_id": storybook_id, 
+        "saved": True, 
+        "page_count": len(pages)
+    }

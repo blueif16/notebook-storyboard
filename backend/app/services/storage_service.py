@@ -123,10 +123,19 @@ async def save_image_to_supabase(
 
 async def get_image_url_from_asset_id(asset_id: str) -> Optional[str]:
     """从asset_id获取图片URL"""
+    print(f"\n{'='*60}")
+    print("🔗 [STORAGE] get_image_url_from_asset_id called")
+    print(f"🆔 Asset ID: {asset_id}")
+    print(f"{'='*60}\n")
+    
     supabase_client = _init_supabase()
     if not supabase_client:
-        raise RuntimeError("Supabase未配置")
+        error_msg = "Supabase not configured"
+        print(f"❌ [STORAGE] {error_msg}")
+        raise RuntimeError(error_msg)
+    
     try:
+        print("🔍 [STORAGE] Querying user_images table...")
         response = (
             supabase_client.table("user_images")
             .select("storage_path")
@@ -134,10 +143,16 @@ async def get_image_url_from_asset_id(asset_id: str) -> Optional[str]:
             .single()
             .execute()
         )
+        
         if not response.data:
-            raise Exception("文件不存在")
+            error_msg = f"File not found for asset_id: {asset_id}"
+            print(f"❌ [STORAGE] {error_msg}")
+            raise Exception(error_msg)
+        
         storage_path = response.data.get("storage_path")
-
+        print(f"📁 [STORAGE] Storage path: {storage_path}")
+        
+        print("🔐 [STORAGE] Creating signed URL...")
         signed_url_response = (
             supabase_client.storage.from_("files")
             .create_signed_url(storage_path, expires_in=3600)
@@ -149,13 +164,20 @@ async def get_image_url_from_asset_id(asset_id: str) -> Optional[str]:
                 signed_url_response.get("signedUrl")
             )
             if signed_url:
+                print(f"✅ [STORAGE] Signed URL created: {signed_url[:60]}...")
+                print(f"{'='*60}\n")
                 return signed_url
         elif isinstance(signed_url_response, str):
+            print(f"✅ [STORAGE] Signed URL created: {signed_url_response[:60]}...")
+            print(f"{'='*60}\n")
             return signed_url_response
 
-        raise Exception(f"生成URL失败: {type(signed_url_response)}")
+        error_msg = f"Failed to generate URL: {type(signed_url_response)}"
+        print(f"❌ [STORAGE] {error_msg}")
+        raise Exception(error_msg)
     except Exception as e:
-        print(f"❌ 获取URL异常: {type(e).__name__}: {str(e)}")
+        print(f"❌ [STORAGE] Error: {type(e).__name__}: {str(e)}")
+        print(f"{'='*60}\n")
         return None
 
 

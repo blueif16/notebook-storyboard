@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Server startup script that ensures proper working directory for uvicorn reload.
+Server startup script with UNBUFFERED output
 """
 import os
 import sys
 from pathlib import Path
+
+# CRITICAL: Force unbuffered output for real-time logging
+sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
+os.environ['PYTHONUNBUFFERED'] = '1'
 
 # Get the backend directory (where this script is located)
 backend_dir = Path(__file__).parent.absolute()
@@ -25,10 +30,15 @@ if __name__ == "__main__":
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", 8000))
 
+    print("="*80)
+    print("🚀 Starting Main Backend Server with UNBUFFERED output")
+    print("="*80)
+
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
         reload=True,
-        reload_dirs=[str(backend_dir)]
+        reload_dirs=[str(backend_dir)],
+        log_level="info"
     )

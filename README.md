@@ -1,178 +1,356 @@
-# HyperBookLM - My Notebook
+# HyperBookLM - AI-Powered Storybook Generator
 
-A powerful notebook application with AI-powered content generation, featuring storybooks, slides, mindmaps, and more.
+An AI-powered storybook generation system using LangGraph for agent orchestration and AG-UI protocol for real-time streaming updates.
 
-## Project Structure
+工作原理：
+State 同步：useCoAgent 自动同步后端的 StorybookState，包括 enhanced_story、characters、pages 等
+
+Interrupt 流程：
+
+后端调用 user_interaction 工具触发 interrupt
+AG-UI adapter 发送 CustomEvent (name: "on_interrupt")
+CopilotKit 捕获事件并调用 useLangGraphInterrupt 的 render 函数
+HITLModal 显示对应的审查内容（story_review / character_review / pages_review）
+用户批准或提供反馈
+调用 resolve 函数将响应返回给后端
+后端根据 intention 决定是继续当前阶段还是进入下一阶段
+类型驱动的 UI：
+
+type: "story_review" → 显示增强后的故事和角色列表
+type: "character_review" → 显示角色肖像网格
+type: "pages_review" → 显示故事书页面预览
+
+## 🏗️ V2 Architecture - Hierarchical Subgraphs with Context Isolation
 
 ```
-mynotebook/
-├── frontend/          # Next.js frontend application
-│   ├── app/
-│   │   ├── page.tsx                    # Main application page
-│   │   ├── library/
-│   │   │   ├── page.tsx                # Asset library page
-│   │   │   └── storybook/
-│   │   │       └── [id]/
-│   │   │           └── page.tsx        # Individual storybook viewer
-│   │   └── api/                        # API routes
-│   │       ├── gemini/
-│   │       │   ├── storybook/          # Storybook generation API
-│   │       │   └── slides/             # Slides generation API
-│   │       ├── gpt/
-│   │       │   └── mindmap/            # Mindmap generation API
-│   │       ├── chat/                   # Chat API
-│   │       ├── audio/                  # Audio generation API
-│   │       └── scrape/                 # Web scraping API
-│   ├── components/
-│   │   ├── Navbar.tsx                  # Navigation bar with library icon
-│   │   ├── StoryBook.tsx               # Interactive storybook component
-│   │   ├── OutputsPanel.tsx            # Outputs display panel
-│   │   ├── SourcesPanel.tsx            # Sources management
-│   │   ├── ChatInterface.tsx           # Chat interface
-│   │   └── MindMap.tsx                 # Mindmap visualization
-│   └── lib/
-│       ├── storage.ts                  # LocalStorage utilities
-│       ├── types.ts                    # TypeScript type definitions
-│       └── utils.ts                    # Utility functions
-│
-└── backend/           # Python FastAPI backend
-    ├── app/
-    │   ├── main.py                     # FastAPI entry point
-    │   ├── routers/                    # API route handlers
-    │   ├── models/                     # Pydantic models
-    │   ├── services/                   # Business logic
-    │   └── utils/                      # Utility functions
-    └── tests/                          # Test files
+┌─────────────────────────────────────────────────────────────────┐
+│                    PARENT GRAPH STATE                           │
+│  {messages, enhanced_story, characters, pages, storybook_id}   │
+│        ↑ Only final outputs, NO accumulated conversations       │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+       ┌──────────────────┼──────────────────┐
+       ↓                  ↓                  ↓
+┌─────────────┐   ┌─────────────┐   ┌─────────────┐
+│  ENHANCE    │   │  PORTRAIT   │   │   STORY     │
+│  SUBGRAPH   │   │  SUBGRAPH   │   │  SUBGRAPH   │
+├─────────────┤   ├─────────────┤   ├─────────────┤
+│ Private:    │   │ Private:    │   │ Private:    │
+│  messages   │   │  messages   │   │  messages   │
+│             │   │             │   │             │
+│ Input:      │   │ Input:      │   │ Input:      │
+│  user idea  │   │  enhanced_  │   │  enhanced_  │
+│             │   │   story +   │   │   story +   │
+│             │   │  characters │   │  characters │
+│             │   │             │   │   (images)  │
+│             │   │             │   │             │
+│ Output:     │   │ Output:     │   │ Output:     │
+│  enhanced_  │   │  characters │   │  pages +    │
+│   story +   │   │   + images  │   │  storybook  │
+│  characters │   │             │   │   _id       │
+│             │   │             │   │             │
+│ Loop:       │   │ Loop:       │   │ Loop:       │
+│  feedback → │   │  feedback → │   │  feedback → │
+│   continue  │   │   continue  │   │   continue  │
+│  APPROVED → │   │  APPROVED → │   │  APPROVED → │
+│   exit      │   │   exit      │   │   exit      │
+└─────────────┘   └─────────────┘   └─────────────┘
 ```
 
-## Features
+### 🎯 Key Architectural Features (V2)
 
-### 🎨 Interactive Storybook
-- Beautiful page-flip animations using Framer Motion
-- Two-page spread layout like a real book
-- Auto-save to localStorage for persistence
-- Export as JSON for backup
+**Context Isolation**: Each stage operates with **private message context**
+- **Enhance** sees only: User story idea
+- **Portrait** sees only: Enhanced story + character descriptions
+- **Story** sees only: Enhanced story + character images
+- **Result**: No context accumulation, cleaner state management
 
-### 📚 Asset Library
-- Centralized repository for all generated content
-- Filter by type: Storybooks, Slides, Mindmaps, Audio, Summaries
-- Quick actions: View, Export, Delete
-- Metadata tracking: creation date, source count
+**Subgraph Pattern** (LangGraph Guide Section 6):
+- Each stage is a compiled subgraph with internal HITL loop
+- Private messages stay in subgraph, don't pollute parent state
+- Parent state holds only clean outputs: `enhanced_story`, `characters`, `pages`
 
-### 🔄 Auto-Save System
-- All generated storybooks automatically saved to localStorage
-- Long-lived storage across browser sessions
-- Smart title generation from source materials
-- Metadata preservation
+**Agent Caching** (LangGraph Guide Section 3.2):
+- Agents created once, reused across calls
+- Significant performance improvement over recreating agents
 
-### 🎯 Navigation
-- Library icon in navbar for quick access
-- Breadcrumb navigation
-- Responsive design for mobile and desktop
+**Internal HITL Loops**:
+- Each subgraph handles user feedback internally
+- Feedback loop: `agent → user_interaction → check response → back to agent or exit`
+- Approved: exits subgraph, progresses to next stage
+- Escalate: exits to orchestrator for direction change
 
-## Getting Started
+## 🚀 Quick Start
 
-### Frontend Setup
+### 1. Install Dependencies
 
 ```bash
+# Backend
+cd backend
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# Frontend
 cd frontend
 npm install
+```
+
+### 2. Configure Environment
+
+Copy `.env.example` to `.env` and add your API keys:
+
+```env
+# LLM
+GOOGLE_API_KEY=your-google-api-key
+GEMINI_TEXT_MODEL=gemini-3-flash-preview
+
+# Image Generation
+GOOGLE_DEFAULT_MODEL=gemini-3-pro-image-preview
+
+# Storage
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SECRET_KEY=your-secret-key
+
+# Server
+API_PORT=8000
+ALLOWED_ORIGINS=http://localhost:3000,http://localhost:3847
+```
+
+### 3. Start the Application
+
+**Option A: Using the start script (recommended)**
+```bash
+./start.sh
+```
+
+**Option B: Manual start**
+```bash
+# Terminal 1: Backend
+cd backend
+python run_server.py
+
+# Terminal 2: Frontend
+cd frontend
 npm run dev
 ```
 
-The frontend will be available at `http://localhost:3000`
+### 4. Access the Application
 
-### Backend Setup
+- **Frontend**: http://localhost:3847
+- **Backend API**: http://localhost:8000
+- **API Docs**: http://localhost:8000/docs
+- **AG-UI Streaming**: http://localhost:8000/storybook
+
+## 📁 Project Structure (V2)
+
+```
+notebook-storyboard/
+├── backend/
+│   ├── app/
+│   │   ├── main.py                    # Unified FastAPI server
+│   │   ├── config.py                  # Centralized configuration
+│   │   ├── ag_ui/
+│   │   │   └── adapter.py             # AG-UI streaming logic
+│   │   ├── agents/
+│   │   │   └── storybook_agents.py    # 4 agents with caching
+│   │   │       • orchestrator (routing)
+│   │   │       • enhance (story enhancement)
+│   │   │       • portrait (character images)
+│   │   │       • story (page generation + save)
+│   │   ├── graphs/
+│   │   │   ├── storybook_graph.py     # Parent graph + 3 subgraphs
+│   │   │   └── routing.py             # Routing logic with logging
+│   │   ├── tools/
+│   │   │   ├── hitl_tools.py          # user_interaction, escalate, route_to_stage
+│   │   │   └── story_tools.py         # Image generation, save tools
+│   │   ├── services/
+│   │   │   ├── google_image_service.py
+│   │   │   └── storage_service.py
+│   │   └── routers/
+│   │       ├── assets.py
+│   │       └── storybooks.py
+│   ├── run_server.py                  # Main server launcher
+│   └── requirements.txt
+│
+└── frontend/
+    ├── app/
+    │   ├── storybook/page.tsx         # Main storybook UI
+    │   └── api/copilotkit/route.ts    # CopilotKit integration
+    └── components/storybook/          # UI components
+
+```
+
+## 🔧 Key Endpoints
+
+### REST API
+- `GET /health` - Health check
+- `GET /api/storybooks` - List all storybooks
+- `GET /api/storybooks/{id}` - Get specific storybook
+- `POST /api/storybooks` - Create storybook (sync)
+
+### AG-UI Streaming
+- `POST /storybook` - Generate storybook with real-time streaming updates
+
+## 🎨 Features
+
+### AI-Powered Generation
+- **Story Enhancement**: Enriches user prompts with visual details
+- **Character Generation**: AI-generated character portraits
+- **Page Illustrations**: Custom images for each story page
+- **Real-time Streaming**: Live updates via SSE
+
+### Human-in-the-Loop (V2)
+- **Enhance stage**: Present enhanced story + characters → feedback loop
+- **Portrait stage**: Show character portraits → feedback loop
+- **Story stage**: Display pages → feedback loop
+- **Escalation**: User can change direction at any stage
+
+### Context Isolation (V2 Key Feature)
+```
+Before V2: 100+ messages accumulated
+[user, ai, tool, ai, user, ai, tool, ai, user, ai, tool...]
+
+After V2: ~5 routing messages only
+[user: "story idea", ai: "enhanced", ai: "portraits done", ai: "story complete"]
+```
+
+Each stage sees ONLY what it needs:
+- Clean handoffs between stages
+- No polluted context
+- Each subgraph independently testable
+
+## 🏃 Development
+
+### Testing the Backend
 
 ```bash
 cd backend
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install -r requirements.txt
-python app/main.py
+
+# Test graph execution directly
+python test_run_storybook.py
+
+# Test HTTP API
+python test_http_api.py
+
+# Test Supabase connection
+python test_supabase_connection.py
 ```
 
-The backend API will be available at `http://localhost:8000`
+### Testing Individual Subgraphs
 
-## Documentation
+```python
+from app.graphs.storybook_graph import get_enhance_subgraph
 
-For detailed documentation, see the [docs/](docs/) folder:
-- [Setup & Configuration](docs/setup/CONFIGURATION.md) - Environment setup guide
-- [Database Setup](docs/database/SUPABASE_MIGRATION.md) - Supabase configuration
-- [Libraries](docs/libraries/) - Third-party integrations
-- [Full Documentation Index](docs/README.md) - Complete documentation structure
+# Test enhance alone
+enhance = get_enhance_subgraph()
+result = await enhance.ainvoke({
+    "messages": [{"role": "user", "content": "story about dog"}]
+})
 
-## Environment Variables
+# Clean input, clean output, no parent context pollution
+```
 
-See the [Configuration Guide](docs/setup/CONFIGURATION.md) for detailed setup instructions.
+### Debugging
 
-Quick start: Copy `.env.example` to `.env` and add your API keys.
+Enable detailed logging:
+```python
+# In config.py
+DEBUG = True
+LANGCHAIN_TRACING_V2 = "true"
+```
 
-## Usage
+Check logs for routing decisions:
+```
+[ROUTE] Evaluating routing from stage: enhance
+[ROUTE] user_interaction called with intention=next
+[ROUTE] User response: APPROVED
+[ROUTE] APPROVED → progressing to portrait
+```
 
-1. **Add Sources**: Upload PDFs or add URLs to scrape content
-2. **Analyze**: Click "Analyze Sources" to generate all outputs
-3. **View Storybook**: Check the Outputs panel for your generated storybook
-4. **Access Library**: Click the Library icon in the navbar to view all saved assets
-5. **Export**: Download storybooks as JSON for backup or sharing
+## 📚 Technologies
 
-## Storage
-
-All generated assets are stored in the browser's localStorage:
-- Key: `hyperbooklm_assets`
-- Format: JSON array of StoredAsset objects
-- Persistence: Survives browser restarts
-- Capacity: ~5-10MB depending on browser
-
-## API Endpoints
-
-### Frontend API Routes
-- `POST /api/gemini/storybook` - Generate storybook from sources
-- `POST /api/gemini/slides` - Generate presentation slides
-- `POST /api/gpt/mindmap` - Generate mindmap
-- `POST /api/chat` - Chat with AI about sources
-- `POST /api/audio` - Generate audio overview
-- `POST /api/scrape` - Scrape web content
-- `POST /api/upload` - Upload and process PDFs
-
-### Backend API
-See backend documentation for Python FastAPI endpoints.
-
-## Technologies
+### Backend
+- **Framework**: FastAPI
+- **Agent Orchestration**: LangGraph (Hierarchical Subgraph Pattern)
+- **Streaming Protocol**: AG-UI
+- **LLM**: Google Gemini (gemini-3-flash-preview)
+- **Image Generation**: Google Gemini (gemini-3-pro-image-preview)
+- **Storage**: Supabase
 
 ### Frontend
 - **Framework**: Next.js 14 (App Router)
 - **UI**: Tailwind CSS, shadcn/ui
-- **Animations**: Framer Motion
-- **State**: React Hooks
-- **Storage**: LocalStorage API
-- **AI**: Google Gemini, OpenAI GPT
+- **Agent State**: CopilotKit with AG-UI
+- **Real-time Updates**: SSE (Server-Sent Events)
 
-### Backend
-- **Framework**: FastAPI
-- **Language**: Python 3.x
-- **API Docs**: Swagger UI, ReDoc
+## 🔄 V2 Migration Benefits
 
-## Contributing
+### Before (V1)
+```python
+# Linear workflow, accumulated context
+class StorybookState(TypedDict):
+    messages: list  # 100+ messages from all stages!
+    user_feedback: Optional[str]
+```
+
+### After (V2)
+```python
+# Hierarchical subgraphs, isolated context
+class StorybookState(TypedDict):
+    messages: list  # Only ~5 routing messages
+    enhanced_story: str  # Clean output
+    characters: list  # Clean output
+    pages: list  # Clean output
+
+# Each subgraph has private messages that stay private
+```
+
+**Benefits**:
+- ✅ **No context accumulation** - Parent state stays clean
+- ✅ **Focused context per stage** - Agents see only what they need
+- ✅ **Independently testable** - Each subgraph can be tested alone
+- ✅ **Better error isolation** - Errors don't pollute parent state
+- ✅ **Agent caching** - Agents created once, reused across calls
+
+## 📖 Documentation
+
+For detailed documentation, see:
+- [LangGraph Guide](langgraph_guide) - Comprehensive multi-agent patterns
+- [V2 Architecture](HyperBookLM_Architecture_V2.md) - Detailed V2 design doc
+- [Backend README](backend/README.md) - Backend-specific docs
+
+## 🐛 Troubleshooting
+
+### AbortError on Frontend
+- **Cause**: Backend not running or not accessible
+- **Fix**: Ensure backend is running on port 8000
+
+### "run has already errored"
+- **Cause**: Normal AG-UI protocol behavior after errors
+- **Fix**: Check actual error in RUN_ERROR event
+
+### Import errors
+- **Cause**: Virtual environment not activated or missing dependencies
+- **Fix**: `source venv/bin/activate` && `pip install -r requirements.txt`
+
+### Subgraph not exiting
+- **Check**: Routing logic in `graphs/routing.py`
+- **Check**: user_interaction calls have correct `intention` parameter
+- **Check**: Tool results are properly extracted
+
+## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
+3. Make your changes following V2 patterns
+4. Test subgraphs independently
 5. Submit a pull request
 
-## License
+## 📄 License
 
 See LICENSE file for details.
 
-## Support
-
-For issues and questions:
-- Frontend: Check browser console for errors
-- Backend: Check FastAPI logs
-- Storage: Clear localStorage if experiencing issues
-
 ---
 
-**Powered by Hyperbrowser** 🚀
-# notebook-storyboard
+**Powered by LangGraph Hierarchical Subgraphs + AG-UI** 🚀

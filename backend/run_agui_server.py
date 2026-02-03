@@ -1,34 +1,24 @@
 #!/usr/bin/env python3
 """
-AG-UI Server startup script
+OBSOLETE: This script is no longer needed.
+
+The AG-UI streaming endpoint has been merged into the main server.
+Use run_server.py instead, which now handles both REST API and AG-UI streaming.
 """
-import os
 import sys
-from pathlib import Path
 
-# Get the backend directory
-backend_dir = Path(__file__).parent.absolute()
-
-# Change to backend directory
-os.chdir(backend_dir)
-
-# Add backend to Python path
-sys.path.insert(0, str(backend_dir))
-
-# Set PYTHONPATH environment variable for subprocesses
-os.environ['PYTHONPATH'] = f"{backend_dir}:{os.environ.get('PYTHONPATH', '')}"
-
-# Now run uvicorn
-if __name__ == "__main__":
-    import uvicorn
-
-    host = os.getenv("AGUI_HOST", "0.0.0.0")
-    port = int(os.getenv("AGUI_PORT", 8001))
-
-    uvicorn.run(
-        "app.ag_ui.server:app",
-        host=host,
-        port=port,
-        reload=True,
-        reload_dirs=[str(backend_dir)]
-    )
+print("="*80)
+print("⚠️  WARNING: This script is OBSOLETE")
+print("="*80)
+print()
+print("The AG-UI streaming endpoint has been merged into the main server.")
+print("Please use run_server.py instead:")
+print()
+print("  python run_server.py")
+print()
+print("The unified server on port 8000 now handles:")
+print("  • REST API endpoints (/api/*)")
+print("  • AG-UI streaming endpoint (/storybook)")
+print()
+print("="*80)
+sys.exit(1)

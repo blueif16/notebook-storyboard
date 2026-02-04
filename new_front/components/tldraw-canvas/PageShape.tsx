@@ -1,6 +1,6 @@
 import { HTMLContainer, ShapeUtil, TLBaseShape, Rectangle2d, RecordProps, T, TLShape } from '@tldraw/tldraw'
 import { Page } from '@/types/storybook-state'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Sparkles, BookOpen } from 'lucide-react'
 
 declare module 'tldraw' {
   export interface TLGlobalShapePropsMap {
@@ -31,7 +31,7 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
     return {
       w: 400,
       h: 500,
-      page: { page_number: 1, plot: '', image_url: '' },
+      page: { pageNumber: 1, plot: '', imageUrl: '' },
       isReviewMode: false,
       isStreaming: false
     }
@@ -47,6 +47,7 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
 
   component(shape: IPageShape) {
     const { page, isReviewMode, isStreaming } = shape.props
+    const hasImage = !!page.imageUrl
 
     // Review mode: show in grid layout with header
     if (isReviewMode) {
@@ -61,16 +62,16 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
           {/* Content */}
           <div className="flex-1 overflow-auto p-6">
             <div className="text-sm text-gray-600 mb-4">
-              第 {page.page_number} 页
+              第 {page.pageNumber} 页
               {isStreaming && <span className="ml-2 animate-pulse">生成中...</span>}
             </div>
 
             <div className="border rounded-lg p-3 bg-white shadow-sm">
               {/* Page Image */}
-              {page.image_url ? (
+              {page.imageUrl ? (
                 <img
-                  src={page.image_url}
-                  alt={`第 ${page.page_number} 页`}
+                  src={page.imageUrl}
+                  alt={`第 ${page.pageNumber} 页`}
                   className="w-full aspect-video object-cover rounded-lg mb-2"
                 />
               ) : (
@@ -81,7 +82,7 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
 
               {/* Page Info */}
               <div className="text-sm font-semibold mb-1">
-                第 {page.page_number} 页
+                第 {page.pageNumber} 页
               </div>
               {page.plot && (
                 <p className="text-xs text-gray-600">
@@ -95,31 +96,67 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
     }
 
     // Normal mode: single page card
-
     return (
       <HTMLContainer className="pointer-events-all h-full w-full bg-white shadow-2xl rounded-2xl border border-gray-200 flex flex-col overflow-hidden">
+        {/* Page number badge */}
+        <div className="absolute top-3 left-3 z-10 bg-black/70 text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg">
+          {page.pageNumber}
+        </div>
+        
+        {/* Streaming indicator badge */}
+        {isStreaming && !hasImage && (
+          <div className="absolute top-3 right-3 z-10 bg-amber-500 text-white px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 shadow-lg">
+            <Sparkles className="w-3 h-3" />
+            生成中
+          </div>
+        )}
+        
         {/* Page Image */}
-        <div className="relative w-full flex-1 bg-gradient-to-br from-amber-50 to-orange-50">
-          {page.image_url ? (
+        <div className="relative w-full flex-1 bg-gradient-to-br from-amber-50 to-orange-50 overflow-hidden">
+          {hasImage ? (
             <img
-              src={page.image_url}
-              alt={`Page ${page.page_number}`}
-              className="w-full h-full object-cover"
+              src={page.imageUrl}
+              alt={`Page ${page.pageNumber}`}
+              className="w-full h-full object-cover transition-opacity duration-500"
             />
           ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <Loader2 className="w-12 h-12 animate-spin text-gray-400" />
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3">
+              {isStreaming ? (
+                <>
+                  <div className="relative">
+                    <div className="absolute inset-0 bg-amber-400/20 rounded-full animate-ping" style={{ animationDuration: '1.5s' }} />
+                    <Loader2 className="w-12 h-12 animate-spin text-amber-500 relative z-10" />
+                  </div>
+                  <span className="text-sm text-gray-500 font-medium">正在绘制...</span>
+                </>
+              ) : (
+                <>
+                  <div className="w-16 h-16 rounded-full bg-gray-200 flex items-center justify-center">
+                    <BookOpen className="w-8 h-8 text-gray-400" />
+                  </div>
+                  <span className="text-sm text-gray-400">等待生成</span>
+                </>
+              )}
+            </div>
+          )}
+          
+          {/* Completion checkmark */}
+          {hasImage && (
+            <div className="absolute bottom-2 right-2 bg-green-500 text-white w-6 h-6 rounded-full flex items-center justify-center shadow-lg">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
             </div>
           )}
         </div>
 
         {/* Page Info */}
         <div className="p-4 bg-white border-t border-gray-200">
-          <div className="text-sm font-bold text-gray-500 mb-2">
-            Page {page.page_number}
-          </div>
           {page.plot && (
             <p className="text-sm text-gray-700 line-clamp-3">{page.plot}</p>
+          )}
+          {!page.plot && (
+            <p className="text-sm text-gray-400 italic">暂无剧情描述</p>
           )}
         </div>
       </HTMLContainer>

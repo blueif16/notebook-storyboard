@@ -85,10 +85,10 @@ YOUR JOB:
 1. Take user's story idea and enhance it with vivid details
 2. Add visual descriptions for characters and scenes
 3. Extract all main characters with physical descriptions
+4. Make sure everything is writeen in user's language
 
 YOUR TOOLS:
 - present_enhanced_story: Mark story as ready for review (REQUIRED when done)
-- user_interaction: Get user feedback during the process
 - escalate: If user wants something completely different
 
 WORKFLOW:
@@ -98,14 +98,13 @@ WORKFLOW:
 4. Call present_enhanced_story(enhanced_story="...", characters=[...])
 5. Stream a prompt asking user to review:
    "I've enhanced your story and identified X characters. Please review and approve to continue."
-6. If user says "APPROVED" → done
-7. If user gives feedback → revise and call present_enhanced_story again
 
 CRITICAL RULES:
 - You MUST call present_enhanced_story when story is ready
 - After calling the tool, stream a text prompt for the user
 - DO NOT put story content in the text prompt - it's already in the tool call
 - The tool call stores the data, your text message asks for review
+- If user provides feedback, revise the story and call present_enhanced_story again
 
 EXAMPLE:
 Step 1: Call present_enhanced_story(
@@ -141,31 +140,32 @@ def create_portrait_agent():
 YOUR JOB:
 1. Generate portrait image for EACH character
 2. Show each portrait as it's ready (state updates automatically)
-3. When all portraits done, ask for approval
+3. Output text to prompt user for review
 
 YOUR TOOLS:
 - generate_character_portrait: Creates portrait, auto-updates state with image_url
-- user_interaction: Get user feedback
 - escalate: If user wants to change story direction
 
 WORKFLOW:
-1. Read character info from conversation history
-2. Generate portraits one by one using generate_character_portrait(description, character_name)
-3. After all portraits are ready, call:
-   user_interaction(
-       type="character_review",
-       intention="next",
-       prompt="Please review the character portraits. Approve to continue to story pages."
+1. Read character info from conversation history (each character has an "index" field)
+2. Generate portraits one by one using:
+   generate_character_portrait(
+       description=character["description"],
+       character_name=character["name"],
+       character_index=character["index"]  # IMPORTANT: Pass the index!
    )
-4. If user wants changes → regenerate specific characters
-5. If user wants different story → call escalate(reason="...")
+3. After all portraits are generated, output text to prompt user:
+   "I've generated portraits for all X characters. Please review and approve to continue to story pages."
 
 IMPORTANT:
+- ALWAYS pass character_index parameter when calling generate_character_portrait
+- The index comes from the character object (character["index"])
 - Frontend sees portraits appear one by one as you create them (via state updates)
-- Each generate_character_portrait call updates state.characters automatically
+- Each generate_character_portrait call updates state.characters[index] automatically
 - Keep track of image_ids for later use in story pages
-- Use intention="next" when ready for final approval
-- Frontend reads characters from state, not from this tool"""
+- DO NOT call user_interaction tool - just output text naturally
+- After generating all portraits, output a text prompt asking user to review
+- If user provides feedback, regenerate specific characters as needed"""
     
     return create_react_agent(
         model=model,

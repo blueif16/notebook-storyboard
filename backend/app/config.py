@@ -22,7 +22,7 @@ DEFAULT_IMAGE_SERVICE: ImageServiceType = os.getenv(
 # Google Image Service 配置
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GOOGLE_DEFAULT_MODEL = os.getenv(
-    "GOOGLE_DEFAULT_MODEL", "gemini-3-pro-image-preview"
+    "GOOGLE_DEFAULT_MODEL", "gemini-2.5-flash-image"
 )
 GOOGLE_DEFAULT_ASPECT_RATIO = os.getenv("GOOGLE_DEFAULT_ASPECT_RATIO", "16:9")
 GOOGLE_DEFAULT_RESOLUTION = os.getenv("GOOGLE_DEFAULT_RESOLUTION", "2K")

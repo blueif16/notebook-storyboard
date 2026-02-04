@@ -17,17 +17,16 @@ from .story_tools import (
 # TOOL SETS BY AGENT
 # =============================================================================
 
-# Enhance Agent: HITL tools + present tool
+# Enhance Agent: 只需要 present_enhanced_story 和 escalate
+# user_interaction 已移到 parent node 中处理
 ENHANCE_TOOLS = [
     present_enhanced_story,
-    user_interaction,
     escalate,
 ]
 
-# Portrait Agent: character generation + HITL
+# Portrait Agent: character generation only (no user_interaction)
 PORTRAIT_TOOLS = [
     generate_character_portrait,
-    user_interaction,
     escalate,
 ]
 

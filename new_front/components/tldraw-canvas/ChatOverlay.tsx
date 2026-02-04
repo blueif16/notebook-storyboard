@@ -23,8 +23,9 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
     type: string;
     resolve: (response: any) => void;
   } | null>(null)
+  const [approvedMessageIndices, setApprovedMessageIndices] = useState<Set<number>>(new Set())
 
-  const { messages, sendMessage } = useCopilotChatHeadless_c()
+  const { messages, sendMessage, isLoading } = useCopilotChatHeadless_c()
   const displayMessages = (messages || []).filter(msg =>
     msg.content && (typeof msg.content === 'string' ? msg.content.trim() : true)
   )
@@ -48,6 +49,15 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
       }
     }
   })
+
+  // 监听 currentInterrupt 变化
+  useEffect(() => {
+    logger.info('currentInterrupt 状态变化', {
+      hasInterrupt: currentInterrupt !== null,
+      type: currentInterrupt?.type,
+      messagesCount: displayMessages.length
+    })
+  }, [currentInterrupt, displayMessages.length])
 
   // 监听消息变化
   useEffect(() => {
@@ -97,13 +107,15 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
     logger.info('用户点击 Agree')
 
     if (currentInterrupt?.resolve) {
-      // 使用 resolve 函数恢复执行
-      currentInterrupt.resolve('APPROVED')
-      logger.info('Approval 已通过 resolve 发送')
-    }
+      // 记录当前最后一条 assistant 消息的索引
+      const lastAssistantIndex = displayMessages.length - 1
+      setApprovedMessageIndices(prev => new Set(prev).add(lastAssistantIndex))
 
-    // 清除当前 interrupt
-    setCurrentInterrupt(null)
+      currentInterrupt.resolve('APPROVED')
+      logger.info('Approval 已通过 resolve 发送', { messageIndex: lastAssistantIndex })
+
+      setCurrentInterrupt(null)
+    }
   }
 
   return (
@@ -136,6 +148,8 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
 
             {displayMessages.map((msg: any, idx: number) => {
               const isLastAssistantMessage = msg.role === 'assistant' && idx === displayMessages.length - 1
+              const isApproved = approvedMessageIndices.has(idx)
+              const hasActiveInterrupt = isLastAssistantMessage && currentInterrupt !== null
 
               return (
                 <div key={msg.id || idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
@@ -154,14 +168,19 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
                       </div>
 
                       <div className="flex gap-2 mt-2">
-                        {/* Agree 按钮 - 只在最后一条 assistant 消息且有 interrupt 时显示 */}
-                        {isLastAssistantMessage && currentInterrupt && (
+                        {/* Agree 按钮 - 显示当前状态或已批准状态 */}
+                        {hasActiveInterrupt && (
                           <button
                             onClick={handleApprove}
                             className="px-3 py-1 text-xs bg-gray-500 hover:bg-gray-600 text-white rounded-full transition-colors"
                           >
                             Agree
                           </button>
+                        )}
+                        {isApproved && (
+                          <div className="px-3 py-1 text-xs bg-green-500 text-white rounded-full">
+                            ✓ Approved
+                          </div>
                         )}
 
                         <button
@@ -182,6 +201,19 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
                 </div>
               )
             })}
+
+            {/* 加载指示器 - unified loading state from CopilotKit */}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%]">
+                  <div className="flex items-center gap-1 text-gray-400">
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="p-4 bg-white border-t border-gray-100">

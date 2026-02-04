@@ -11,8 +11,8 @@ declare module 'tldraw' {
       characters: Array<{
         name: string;
         description?: string;
-        image_id?: string;
-        image_url?: string;
+        imageId?: string;
+        imageUrl?: string;
       }>;
       isStreaming: boolean;
     }
@@ -32,8 +32,8 @@ export class StoryReviewShapeUtil extends ShapeUtil<IStoryReviewShape> {
     characters: T.arrayOf(T.object({
       name: T.string,
       description: T.string.optional(),
-      image_id: T.string.optional(),
-      image_url: T.string.optional(),
+      imageId: T.string.optional(),
+      imageUrl: T.string.optional(),
     })),
     isStreaming: T.boolean,
   }

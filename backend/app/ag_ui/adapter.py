@@ -132,35 +132,41 @@ def snake_to_camel(name: str) -> str:
     return components[0] + ''.join(x.title() for x in components[1:])
 
 
-def convert_keys_to_camel(obj):
-    """Recursively convert all dict keys from snake_case to camelCase.
-    Also removes None values since Zod optional() expects undefined, not null.
+def convert_event_keys(obj):
+    """Recursively convert dict keys from snake_case to camelCase.
+    Also removes None values since Zod expects undefined, not null.
+    Used only for AG-UI event envelope fields (not user state data).
     """
     if isinstance(obj, dict):
         result = {}
         for k, v in obj.items():
-            # Skip None values - Zod optional() expects undefined (missing), not null
+            # Skip None values - Zod expects undefined (missing), not null
             if v is None:
                 continue
-            result[snake_to_camel(k)] = convert_keys_to_camel(v)
+            result[snake_to_camel(k)] = convert_event_keys(v)
         return result
     elif isinstance(obj, list):
-        return [convert_keys_to_camel(item) for item in obj]
+        return [convert_event_keys(item) for item in obj]
     else:
         return obj
 
 
 class EventEncoder:
-    """SSE event encoder for AG-UI protocol with camelCase conversion."""
+    """SSE event encoder for AG-UI protocol."""
 
     def __init__(self, accept: str = SSE_CONTENT_TYPE):
         self.accept = accept
 
     def encode(self, event) -> str:
-        """Encode event to SSE format with camelCase keys."""
-        # Dump to dict first, then convert keys to camelCase and remove None values
+        """Encode event to SSE format with camelCase keys.
+        
+        Note: AG-UI pydantic models use snake_case (thread_id, run_id, message_id)
+        but CopilotKit expects camelCase (threadId, runId, messageId).
+        We convert the event envelope here. State data is already camelCase.
+        """
         data_dict = event.model_dump()
-        camel_dict = convert_keys_to_camel(data_dict)
+        # Convert event envelope keys to camelCase, remove None values
+        camel_dict = convert_event_keys(data_dict)
         data = json.dumps(camel_dict)
         
         # Extra logging for interrupt events
@@ -192,15 +198,31 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
     # Tool call accumulator for streaming
     tool_accumulator = ToolCallAccumulator()
     last_emitted_story = ""  # Track to avoid duplicate emissions
-    review_type_emitted = False  # Track if we've emitted review_type
-    current_stage = None  # Track current stage for review_type inference
+    review_type_emitted = False  # Track if we've emitted reviewType
+    current_stage = None  # Track current stage for reviewType inference
+    
+    # Track portrait generation state
+    portrait_review_emitted = False  # Track if we've emitted character_review
+    portrait_generating_count = 0  # Track number of portraits being generated
+    
+    # Track pages generation state
+    pages_review_emitted = False  # Track if we've emitted pages_review
+
+    # Extract resume from forwarded_props (CopilotKit sends it here)
+    resume_value = None
+    if hasattr(input_data, 'forwarded_props') and input_data.forwarded_props:
+        if isinstance(input_data.forwarded_props, dict):
+            # Check for command.resume pattern
+            command = input_data.forwarded_props.get('command', {})
+            if isinstance(command, dict):
+                resume_value = command.get('resume')
 
     print(f"\n{'='*80}")
     print(f"[AG-UI Stream] Starting new storybook generation")
     print(f"[AG-UI Stream]   thread_id: {thread_id}")
     print(f"[AG-UI Stream]   run_id: {run_id} (always new)")
-    print(f"[AG-UI Stream]   resume: {bool(hasattr(input_data, 'resume') and input_data.resume)}")
-    print(f"[AG-UI Stream]   input_data: {json.dumps(input_data.model_dump(), indent=2, default=str)}")
+    print(f"[AG-UI Stream]   resume: {resume_value}")
+    print(f"[AG-UI Stream]   forwarded_props: {json.dumps(input_data.forwarded_props, indent=2, default=str) if hasattr(input_data, 'forwarded_props') else 'None'}")
     print(f"{'='*80}\n")
 
     # Send RUN_STARTED
@@ -229,19 +251,56 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
         ))
         return
     
-    # Send initial state snapshot
+    # Build initial state snapshot
+    # When resuming, load existing state from checkpointer to preserve characters/pages
     initial_ui_state = {
-        "stage": "starting", 
-        "progress": 0, 
-        "characters": [], 
-        "pages": [], 
-        "characters_count": 0, 
-        "pages_count": 0, 
-        "storybook_id": None, 
-        "title": None
+        "currentStage": "starting",
+        "progress": 0,
+        "characters": [],
+        "pages": [],
+        "charactersCount": 0,
+        "pagesCount": 0,
+        "storybookId": "",
+        "title": "",
+        "reviewType": "",
+        "isStreaming": False,
+        "portraitGeneratingIndex": -1,
+        "enhancedStory": "",
+        "enhancedStoryPartial": "",
+        "charactersPartial": [],
     }
+    
+    # If resuming, load existing state from graph checkpointer
+    if resume_value:
+        try:
+            graph = get_graph()
+            config = {"configurable": {"thread_id": thread_id}}
+            existing_state = graph.get_state(config)
+            if existing_state and existing_state.values:
+                vals = existing_state.values
+                print(f"[AG-UI Stream] Loading existing state for resume:")
+                print(f"[AG-UI Stream]   enhanced_story: {len(vals.get('enhanced_story', '') or '')} chars")
+                print(f"[AG-UI Stream]   characters: {len(vals.get('characters', []))} items")
+                print(f"[AG-UI Stream]   pages: {len(vals.get('pages', []))} items")
+                
+                # Populate from checkpointer state
+                if vals.get("enhanced_story"):
+                    initial_ui_state["enhancedStory"] = vals["enhanced_story"]
+                if vals.get("characters"):
+                    initial_ui_state["characters"] = vals["characters"]
+                    initial_ui_state["charactersCount"] = len(vals["characters"])
+                if vals.get("pages"):
+                    initial_ui_state["pages"] = vals["pages"]
+                    initial_ui_state["pagesCount"] = len(vals["pages"])
+                if vals.get("storybook_id"):
+                    initial_ui_state["storybookId"] = vals["storybook_id"]
+                if vals.get("current_stage"):
+                    initial_ui_state["currentStage"] = vals["current_stage"]
+        except Exception as e:
+            print(f"[AG-UI Stream] Warning: Could not load existing state: {e}")
+    
     yield encoder.encode(StateSnapshotEvent(
-        type=EventType.STATE_SNAPSHOT, 
+        type=EventType.STATE_SNAPSHOT,
         snapshot=initial_ui_state
     ))
 
@@ -258,12 +317,13 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
         print(f"[AG-UI Stream] Starting graph execution...")
 
         # Check if this is a resume from interrupt
-        if hasattr(input_data, 'resume') and input_data.resume:
-            print(f"[AG-UI Stream] Resuming from interrupt with payload")
+        if resume_value:
+            print(f"[AG-UI Stream] Resuming from interrupt")
+            print(f"[AG-UI Stream]   resume value: {resume_value}")
             from langgraph.types import Command
-            resume_payload = input_data.resume.get("payload") if isinstance(input_data.resume, dict) else None
+            # 直接传递 resume 值（如 "APPROVED" 或用户反馈）
             event_stream = graph.astream_events(
-                Command(resume=resume_payload),
+                Command(resume=resume_value),
                 config=config,
                 version="v2"
             )
@@ -285,8 +345,61 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
             if event_type == "on_chain_start":
                 event_name = event.get("name", "")
                 if event_name in ["enhance", "portrait", "story"]:
+                    previous_stage = current_stage
                     current_stage = event_name
-                    print(f"[AG-UI Stream] Detected stage: {current_stage}")
+                    print(f"[AG-UI Stream] 🎬 Detected stage: {current_stage}")
+                    
+                    # Emit stage change as currentStage delta
+                    yield encoder.encode(StateDeltaEvent(
+                        type=EventType.STATE_DELTA,
+                        delta=[{
+                            "op": "replace",
+                            "path": "/currentStage",
+                            "value": current_stage
+                        }]
+                    ))
+                    
+                    # When transitioning TO portrait, the enhance Command has now been processed
+                    # Query graph state to get the characters that were just added
+                    if current_stage == "portrait" and previous_stage == "enhance":
+                        try:
+                            graph = get_graph()
+                            config = {"configurable": {"thread_id": thread_id}}
+                            current_graph_state = graph.get_state(config)
+                            if current_graph_state and current_graph_state.values:
+                                vals = current_graph_state.values
+                                characters = vals.get("characters", [])
+                                enhanced_story = vals.get("enhanced_story", "")
+                                print(f"[AG-UI Stream] 📚 Transition to portrait - syncing state:")
+                                print(f"[AG-UI Stream]   characters: {len(characters)} items")
+                                print(f"[AG-UI Stream]   enhanced_story: {len(enhanced_story or '')} chars")
+                                
+                                if characters or enhanced_story:
+                                    sync_patches = []
+                                    if enhanced_story:
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/enhancedStory",
+                                            "value": enhanced_story
+                                        })
+                                    if characters:
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/characters",
+                                            "value": characters
+                                        })
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/charactersCount",
+                                            "value": len(characters)
+                                        })
+                                    if sync_patches:
+                                        yield encoder.encode(StateDeltaEvent(
+                                            type=EventType.STATE_DELTA,
+                                            delta=sync_patches
+                                        ))
+                        except Exception as e:
+                            print(f"[AG-UI Stream] Warning: Could not sync state on portrait transition: {e}")
 
             # Stream LLM tokens
             if event_type == "on_chat_model_stream":
@@ -330,23 +443,23 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                             partial_data = tool_accumulator.update(tc_chunk)
 
                             if partial_data:
-                                # STEP 1: Emit review_type FIRST (separate event)
+                                # STEP 1: Emit reviewType FIRST (separate event)
                                 if not review_type_emitted:
                                     # present_enhanced_story is only used in enhance stage
                                     review_type = "story_review"
 
-                                    print(f"[AG-UI Stream] Emitting review_type: {review_type} (tool: {tool_name})")
+                                    print(f"[AG-UI Stream] 📖 Emitting reviewType: {review_type} (tool: {tool_name})")
                                     yield encoder.encode(StateDeltaEvent(
                                         type=EventType.STATE_DELTA,
                                         delta=[
                                             {
-                                                "op": "add",
-                                                "path": "/review_type",
+                                                "op": "replace",
+                                                "path": "/reviewType",
                                                 "value": review_type
                                             },
                                             {
-                                                "op": "add",
-                                                "path": "/is_streaming",
+                                                "op": "replace",
+                                                "path": "/isStreaming",
                                                 "value": True
                                             }
                                         ]
@@ -383,8 +496,8 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
 
                                 if story and story != last_emitted_story:
                                     data_patches.append({
-                                        "op": "add",
-                                        "path": "/enhanced_story_partial",
+                                        "op": "replace",
+                                        "path": "/enhancedStoryPartial",
                                         "value": story
                                     })
                                     last_emitted_story = story
@@ -392,8 +505,8 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
 
                                 if chars:
                                     data_patches.append({
-                                        "op": "add",
-                                        "path": "/characters_partial",
+                                        "op": "replace",
+                                        "path": "/charactersPartial",
                                         "value": chars
                                     })
                                     print(f"[AG-UI Stream] Streaming characters partial: {len(chars)} items")
@@ -404,10 +517,74 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                         delta=data_patches
                                     ))
 
+            # === TOOL START: Detect when portrait/page generation begins ===
+            elif event_type == "on_tool_start":
+                tool_name = event.get("name", "")
+                
+                # Detect portrait generation start
+                if tool_name == "generate_character_portrait":
+                    portrait_generating_count += 1
+                    
+                    # Emit character_review type on first portrait generation
+                    if not portrait_review_emitted:
+                        print(f"[AG-UI Stream] 🎨 First portrait generation starting - emitting character_review")
+                        yield encoder.encode(StateDeltaEvent(
+                            type=EventType.STATE_DELTA,
+                            delta=[
+                                {
+                                    "op": "replace",
+                                    "path": "/reviewType",
+                                    "value": "character_review"
+                                },
+                                {
+                                    "op": "replace",
+                                    "path": "/isStreaming",
+                                    "value": True
+                                },
+                                {
+                                    "op": "replace",
+                                    "path": "/portraitGeneratingIndex",
+                                    "value": portrait_generating_count - 1
+                                }
+                            ]
+                        ))
+                        portrait_review_emitted = True
+                    else:
+                        # Update which portrait is generating
+                        yield encoder.encode(StateDeltaEvent(
+                            type=EventType.STATE_DELTA,
+                            delta=[{
+                                "op": "replace",
+                                "path": "/portraitGeneratingIndex",
+                                "value": portrait_generating_count - 1
+                            }]
+                        ))
+                
+                # Detect page generation start
+                elif tool_name == "generate_page_image":
+                    if not pages_review_emitted:
+                        print(f"[AG-UI Stream] 📄 First page generation starting - emitting pages_review")
+                        yield encoder.encode(StateDeltaEvent(
+                            type=EventType.STATE_DELTA,
+                            delta=[
+                                {
+                                    "op": "replace",
+                                    "path": "/reviewType",
+                                    "value": "pages_review"
+                                },
+                                {
+                                    "op": "replace",
+                                    "path": "/isStreaming",
+                                    "value": True
+                                }
+                            ]
+                        ))
+                        pages_review_emitted = True
+
             # Emit state deltas for tool completions
             elif event_type == "on_tool_end":
                 tool_name = event.get("name", "")
-                print(f"[AG-UI Stream] Tool completed: {tool_name}")
+                print(f"[AG-UI Stream] ✅ Tool completed: {tool_name}")
 
                 # Handle present_enhanced_story tool completion
                 if tool_name == "present_enhanced_story":
@@ -417,13 +594,13 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                         patches = []
                         if "enhanced_story" in tool_input:
                             patches.append({
-                                "op": "add",
-                                "path": "/enhanced_story",
+                                "op": "replace",
+                                "path": "/enhancedStory",
                                 "value": tool_input["enhanced_story"]
                             })
                         if "characters" in tool_input:
                             patches.append({
-                                "op": "add",
+                                "op": "replace",
                                 "path": "/characters",
                                 "value": tool_input["characters"]
                             })
@@ -441,25 +618,103 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                     review_type_emitted = False
 
                     # Emit streaming finished signal
-                    print(f"[AG-UI Stream] Emitting is_streaming: False")
+                    print(f"[AG-UI Stream] Emitting isStreaming: False")
                     yield encoder.encode(StateDeltaEvent(
                         type=EventType.STATE_DELTA,
                         delta=[{
                             "op": "replace",
-                            "path": "/is_streaming",
+                            "path": "/isStreaming",
                             "value": False
                         }]
                     ))
 
                 elif tool_name == "generate_character_portrait":
+                    # Get tool input and output
+                    tool_input = event.get("data", {}).get("input", {})
+                    tool_output_raw = event.get("data", {}).get("output")
+
+                    if tool_input and tool_output_raw:
+                        # Parse tool output - it might be ToolMessage object or dict
+                        if hasattr(tool_output_raw, "content"):
+                            # ToolMessage object - parse content
+                            try:
+                                tool_output = json.loads(tool_output_raw.content) if isinstance(tool_output_raw.content, str) else tool_output_raw.content
+                            except:
+                                tool_output = {}
+                        else:
+                            # Already a dict
+                            tool_output = tool_output_raw
+
+                        # Get index from tool output (preferred) or input
+                        character_index = tool_output.get("index", tool_input.get("character_index", 0))
+                        image_id = tool_output.get("image_id")
+                        image_url = tool_output.get("image_url")
+
+                        if image_url:
+                            # Use JSON Patch to update specific character by index
+                            print(f"[AG-UI Stream] 🖼️ Updating character at index {character_index} with imageUrl")
+                            yield encoder.encode(StateDeltaEvent(
+                                type=EventType.STATE_DELTA,
+                                delta=[
+                                    {
+                                        "op": "add",
+                                        "path": f"/characters/{character_index}/imageId",
+                                        "value": image_id
+                                    },
+                                    {
+                                        "op": "add",
+                                        "path": f"/characters/{character_index}/imageUrl",
+                                        "value": image_url
+                                    }
+                                ]
+                            ))
+
+                    # Also increment counter for progress tracking
                     yield encoder.encode(StateDeltaEvent(
                         type=EventType.STATE_DELTA,
-                        delta=[{"op": "add", "path": "/characters_count", "value": 1}]
+                        delta=[{"op": "add", "path": "/charactersCount", "value": 1}]
                     ))
+                    
                 elif tool_name == "generate_page_image":
+                    # Get tool input and output
+                    tool_input = event.get("data", {}).get("input", {})
+                    tool_output_raw = event.get("data", {}).get("output")
+                    
+                    if tool_output_raw:
+                        # Parse tool output
+                        if hasattr(tool_output_raw, "content"):
+                            try:
+                                tool_output = json.loads(tool_output_raw.content) if isinstance(tool_output_raw.content, str) else tool_output_raw.content
+                            except:
+                                tool_output = {}
+                        else:
+                            tool_output = tool_output_raw
+                        
+                        page_number = tool_output.get("page_number", tool_input.get("page_number", 0))
+                        image_url = tool_output.get("image_url")
+                        image_id = tool_output.get("image_id")
+                        
+                        if image_url:
+                            print(f"[AG-UI Stream] 📄 Page {page_number} generated with imageUrl")
+                            # Add the page to pages array (camelCase keys)
+                            yield encoder.encode(StateDeltaEvent(
+                                type=EventType.STATE_DELTA,
+                                delta=[{
+                                    "op": "add",
+                                    "path": "/pages/-",  # Append to array
+                                    "value": {
+                                        "pageNumber": page_number,
+                                        "imageId": image_id,
+                                        "imageUrl": image_url,
+                                        "plot": tool_input.get("plot", "")
+                                    }
+                                }]
+                            ))
+                    
+                    # Increment counter for progress tracking
                     yield encoder.encode(StateDeltaEvent(
                         type=EventType.STATE_DELTA,
-                        delta=[{"op": "add", "path": "/pages_count", "value": 1}]
+                        delta=[{"op": "add", "path": "/pagesCount", "value": 1}]
                     ))
 
             # Yield control periodically
@@ -490,6 +745,16 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
 
                         # Check interrupt type
                         interrupt_type = interrupt_value.get("type")
+                        
+                        # Emit isStreaming: false when interrupt happens
+                        yield encoder.encode(StateDeltaEvent(
+                            type=EventType.STATE_DELTA,
+                            delta=[{
+                                "op": "replace",
+                                "path": "/isStreaming",
+                                "value": False
+                            }]
+                        ))
 
                         if interrupt_type == "text":
                             # Text interrupt: message already sent via streaming
@@ -572,6 +837,16 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                             print(f"[AG-UI Stream] Interrupt value: {json.dumps(interrupt_value, indent=2)}")
 
                             interrupt_type = interrupt_value.get("type")
+                            
+                            # Emit isStreaming: false when interrupt happens
+                            yield encoder.encode(StateDeltaEvent(
+                                type=EventType.STATE_DELTA,
+                                delta=[{
+                                    "op": "replace",
+                                    "path": "/isStreaming",
+                                    "value": False
+                                }]
+                            ))
 
                             if interrupt_type == "text":
                                 # Text interrupt - message already streamed

@@ -133,7 +133,7 @@ class GoogleImageService:
 
 async def google_text_to_image(
     prompt: str,
-    model: str = "gemini-3-pro-image-preview",
+    model: str = "gemini-2.5-flash-image",
     return_id: bool = False,
     local_save_path: Optional[str] = None
 ) -> str:
@@ -236,7 +236,7 @@ async def google_text_to_image(
 async def google_image_to_image(
     prompt: str,
     image_asset_ids: Union[str, List[str]],
-    model: str = "gemini-3-pro-image-preview",
+    model: str = "gemini-2.5-flash-image",
     aspect_ratio: Optional[str] = None,
     resolution: Optional[str] = None,
     return_id: bool = False,

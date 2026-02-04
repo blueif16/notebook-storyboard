@@ -3,7 +3,7 @@ import {
   ExperimentalEmptyAdapter,
   copilotRuntimeNextJSAppRouterEndpoint,
 } from "@copilotkit/runtime";
-import { LangGraphHttpAgent } from "@copilotkit/runtime/langgraph";
+import { HttpAgent } from "@ag-ui/client";
 import { NextRequest } from "next/server";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -12,9 +12,9 @@ const serviceAdapter = new ExperimentalEmptyAdapter();
 
 const runtime = new CopilotRuntime({
   agents: {
-    storybook_agent: new LangGraphHttpAgent({
+    storybook_agent: new HttpAgent({
       url: `${BACKEND_URL}/storybook`,
-    }) as any,
+    }),
   },
 });
 

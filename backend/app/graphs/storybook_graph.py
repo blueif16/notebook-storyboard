@@ -119,18 +119,10 @@ def route_enhance_subgraph(state: EnhanceState) -> Literal["agent", "__end__"]:
         logger.info("[SUBGRAPH] Enhance escalating - exiting")
         return "__end__"
 
-    # Check user_interaction with intention="next"
-    interaction = get_tool_call(messages, "user_interaction")
-    if interaction:
-        args = interaction.get("args", {})
-        if args.get("intention") == "next":
-            response = get_tool_result(messages, "user_interaction")
-            if response == "APPROVED":
-                logger.info("[SUBGRAPH] Enhance approved - exiting")
-                return "__end__"
-            else:
-                logger.info("[SUBGRAPH] Enhance got feedback - continuing")
-                return "agent"
+    # Check if present_enhanced_story was called - story is ready
+    if get_tool_call(messages, "present_enhanced_story"):
+        logger.info("[SUBGRAPH] Story presented - exiting")
+        return "__end__"
 
     # Check if last message is AI message without tool calls - agent is done
     if messages:
@@ -330,6 +322,8 @@ async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance",
 你的职责：
 1. 与用户对话，理解他们的需求
 2. 当用户明确想要创作故事时，调用 route_to_stage 工具路由到对应阶段
+3. 使用用户的语言对话以及写reason
+
 
 何时调用 route_to_stage：
 - 用户提供故事想法 → route_to_stage(stage="enhance", reason="用户想创作...的故事，我会...")
@@ -406,12 +400,17 @@ async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance",
         )
 
 
-async def enhance_node(state: StorybookState) -> dict:
+async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "portrait", "orchestrator"]]:
     """
     Call enhance subgraph.
 
     传递 orchestrator 的最后一条消息（包含分析和指令）
     Clean output: enhanced_story + characters
+
+    使用 Command API 控制路由：
+    - APPROVED → goto portrait
+    - 反馈 → goto enhance (继续修改)
+    - 升级 → goto orchestrator
     """
     logger.info("[NODE] enhance_node - invoking subgraph")
 
@@ -446,27 +445,68 @@ async def enhance_node(state: StorybookState) -> dict:
                 break
 
         if story_presented and enhanced_story:
-            # Story is ready for review - send interrupt
+            # ⭐ Auto-generate index for each character
+            characters_with_index = []
+            for idx, char in enumerate(characters):
+                char_with_index = char.copy()
+                char_with_index["index"] = idx
+                characters_with_index.append(char_with_index)
+
+            logger.info(f"[NODE] Added index to {len(characters_with_index)} characters")
+
+            # Story is ready for review - send interrupt and wait for response
             logger.info(f"[NODE] Story ready for review, sending interrupt")
-            interrupt({
+            user_response = interrupt({
                 "type": "story_review",
                 "intention": "next"
             })
+
+            # ⭐ 关键：检查用户响应并决定路由
+            logger.info(f"[NODE] User response: {user_response}")
+
+            if user_response == "APPROVED":
+                # 用户批准 → 进入下一个阶段
+                logger.info(f"[NODE] APPROVED → routing to portrait")
+                return Command(
+                    goto="portrait",
+                    update={
+                        "messages": [AIMessage(content=f"Enhanced story with {len(characters_with_index)} characters")],
+                        "enhanced_story": enhanced_story,
+                        "characters": characters_with_index,
+                        "current_stage": "enhance",
+                    }
+                )
+            else:
+                # 用户提供反馈 → 继续当前阶段
+                logger.info(f"[NODE] Feedback received → back to enhance")
+                return Command(
+                    goto="enhance",
+                    update={
+                        "messages": [
+                            AIMessage(content=f"Enhanced story with {len(characters_with_index)} characters"),
+                            HumanMessage(content=user_response)
+                        ],
+                        "enhanced_story": enhanced_story,
+                        "characters": characters_with_index,
+                        "current_stage": "enhance",
+                    }
+                )
         else:
             # No story presented - just text conversation
             logger.info(f"[NODE] No story presented, sending text interrupt")
-            interrupt({
+            user_response = interrupt({
                 "type": "text",
                 "intention": "self"
             })
 
-        # Return clean outputs
-        return {
-            "messages": [AIMessage(content=f"Enhanced story with {len(characters)} characters")],
-            "enhanced_story": enhanced_story,
-            "characters": characters,
-            "current_stage": "enhance",
-        }
+            # 继续对话
+            return Command(
+                goto="enhance",
+                update={
+                    "messages": [HumanMessage(content=user_response)],
+                    "current_stage": "enhance",
+                }
+            )
 
     except GraphInterrupt:
         # Interrupt must propagate to LangGraph
@@ -475,19 +515,25 @@ async def enhance_node(state: StorybookState) -> dict:
     except RuntimeError as e:
         # Other RuntimeErrors are real errors
         logger.error(f"[NODE] enhance_node failed: {e}")
-        return {
-            "messages": [AIMessage(content=f"Error: {e}")],
-            "current_stage": "enhance",
-        }
+        return Command(
+            goto="orchestrator",
+            update={
+                "messages": [AIMessage(content=f"Error: {e}")],
+                "current_stage": "enhance",
+            }
+        )
     except Exception as e:
         logger.error(f"[NODE] enhance_node failed: {e}")
-        return {
-            "messages": [AIMessage(content=f"Error: {e}")],
-            "current_stage": "enhance",
-        }
+        return Command(
+            goto="orchestrator",
+            update={
+                "messages": [AIMessage(content=f"Error: {e}")],
+                "current_stage": "enhance",
+            }
+        )
 
 
-async def portrait_node(state: StorybookState) -> dict:
+async def portrait_node(state: StorybookState) -> Command[Literal["portrait", "story", "orchestrator"]]:
     """
     Call portrait subgraph.
 
@@ -512,19 +558,61 @@ Generate portrait image for each character."""
             "messages": [HumanMessage(content=context)]
         })
 
-        # Extract character portraits
-        characters = extract_from_tool_messages(
-            result["messages"],
-            "generate_character_portrait"
-        )
+        # Check if any generate_character_portrait tool SUCCEEDED (has image_id in result)
+        portrait_results = extract_from_tool_messages(result["messages"], "generate_character_portrait")
+        portraits_generated = any(r.get("image_id") for r in portrait_results)
+        
+        logger.info(f"[NODE] Portrait results: {len(portrait_results)} calls, success={portraits_generated}")
 
-        logger.info(f"[NODE] Portrait complete: {len(characters)} portraits generated")
+        if portraits_generated:
+            # Portraits generated - send interrupt for review
+            logger.info(f"[NODE] Portraits generated, sending interrupt for review")
+            user_response = interrupt({
+                "type": "character_review",
+                "intention": "next"
+            })
 
-        return {
-            "messages": [AIMessage(content=f"Generated {len(characters)} portraits")],
-            "characters": characters,
-            "current_stage": "portrait",
-        }
+            logger.info(f"[NODE] User response: {user_response}")
+
+            if user_response == "APPROVED":
+                # User approved → go to story stage
+                logger.info(f"[NODE] APPROVED → routing to story")
+                return Command(
+                    goto="story",
+                    update={
+                        "messages": [AIMessage(content=f"Character portraits complete")],
+                        "current_stage": "portrait",
+                    }
+                )
+            else:
+                # User provided feedback → continue portrait stage
+                logger.info(f"[NODE] Feedback received → back to portrait")
+                return Command(
+                    goto="portrait",
+                    update={
+                        "messages": [
+                            AIMessage(content=f"Character portraits generated"),
+                            HumanMessage(content=user_response)
+                        ],
+                        "current_stage": "portrait",
+                    }
+                )
+        else:
+            # No portraits generated - just text conversation
+            logger.info(f"[NODE] No portraits generated, sending text interrupt")
+            user_response = interrupt({
+                "type": "text",
+                "intention": "self"
+            })
+
+            # Continue conversation
+            return Command(
+                goto="portrait",
+                update={
+                    "messages": [HumanMessage(content=user_response)],
+                    "current_stage": "portrait",
+                }
+            )
 
     except GraphInterrupt:
         # Interrupt must propagate to LangGraph
@@ -532,16 +620,22 @@ Generate portrait image for each character."""
         raise
     except RuntimeError as e:
         logger.error(f"[NODE] portrait_node failed: {e}")
-        return {
-            "messages": [AIMessage(content=f"Error: {e}")],
-            "current_stage": "portrait",
-        }
+        return Command(
+            goto="orchestrator",
+            update={
+                "messages": [AIMessage(content=f"Error: {e}")],
+                "current_stage": "portrait",
+            }
+        )
     except Exception as e:
         logger.error(f"[NODE] portrait_node failed: {e}")
-        return {
-            "messages": [AIMessage(content=f"Error: {e}")],
-            "current_stage": "portrait",
-        }
+        return Command(
+            goto="orchestrator",
+            update={
+                "messages": [AIMessage(content=f"Error: {e}")],
+                "current_stage": "portrait",
+            }
+        )
 
 
 async def story_node(state: StorybookState) -> dict:
@@ -664,29 +758,10 @@ def build_storybook_graph() -> StateGraph:
     # Edges
     builder.add_edge(START, "orchestrator")
 
-    # orchestrator 使用 Command API，不需要条件边
-    # Command 返回值会自动路由到 "enhance", "portrait", "story", 或 "__end__"
-
-    builder.add_conditional_edges(
-        "enhance",
-        lambda s: route_after_stage(s, "enhance"),
-        {
-            "enhance": "enhance",
-            "portrait": "portrait",
-            "orchestrator": "orchestrator",
-        }
-    )
+    # orchestrator, enhance, portrait all use Command API - no conditional edges needed
+    # Command return value automatically routes to specified node
     
-    builder.add_conditional_edges(
-        "portrait",
-        lambda s: route_after_stage(s, "portrait"),
-        {
-            "portrait": "portrait",
-            "story": "story",
-            "orchestrator": "orchestrator",
-        }
-    )
-    
+    # Only story uses conditional edges (returns dict, not Command)
     builder.add_conditional_edges(
         "story",
         lambda s: route_after_stage(s, "story"),

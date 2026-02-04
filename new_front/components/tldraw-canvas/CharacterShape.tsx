@@ -1,6 +1,6 @@
 import { HTMLContainer, ShapeUtil, TLBaseShape, Rectangle2d, RecordProps, T, TLShape } from '@tldraw/tldraw'
 import { Character } from '@/types/storybook-state'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Sparkles } from 'lucide-react'
 
 declare module 'tldraw' {
   export interface TLGlobalShapePropsMap {
@@ -23,10 +23,11 @@ export class CharacterShapeUtil extends ShapeUtil<ICharacterShape> {
     w: T.number,
     h: T.number,
     character: T.object({
+      index: T.number.optional(),
       name: T.string,
       description: T.string.optional(),
-      image_id: T.string.optional(),
-      image_url: T.string.optional(),
+      imageId: T.string.optional(),
+      imageUrl: T.string.optional(),
     }),
     isReviewMode: T.boolean.optional(),
     isStreaming: T.boolean.optional(),
@@ -52,6 +53,7 @@ export class CharacterShapeUtil extends ShapeUtil<ICharacterShape> {
 
   component(shape: ICharacterShape) {
     const { character, isReviewMode, isStreaming } = shape.props
+    const hasImage = !!character.imageUrl
 
     // Review mode: show in grid layout with header
     if (isReviewMode) {
@@ -72,9 +74,9 @@ export class CharacterShapeUtil extends ShapeUtil<ICharacterShape> {
             )}
             <div className="border rounded-lg p-4 bg-white shadow-sm">
               {/* Character Image */}
-              {character.image_url ? (
+              {character.imageUrl ? (
                 <img
-                  src={character.image_url}
+                  src={character.imageUrl}
                   alt={character.name}
                   className="w-full aspect-square object-cover rounded-lg mb-3"
                 />
@@ -96,29 +98,68 @@ export class CharacterShapeUtil extends ShapeUtil<ICharacterShape> {
     }
 
     // Normal mode: single character card
-
     return (
       <HTMLContainer className="pointer-events-all h-full w-full bg-white shadow-2xl rounded-2xl border border-gray-200 flex flex-col overflow-hidden">
+        {/* Character name badge */}
+        <div className="absolute top-3 left-3 z-10 bg-black/70 text-white px-3 py-1 rounded-full text-sm font-bold shadow-lg max-w-[calc(100%-60px)] truncate">
+          {character.name}
+        </div>
+        
+        {/* Streaming indicator badge */}
+        {isStreaming && !hasImage && (
+          <div className="absolute top-3 right-3 z-10 bg-blue-500 text-white px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 shadow-lg">
+            <Sparkles className="w-3 h-3" />
+            生成中
+          </div>
+        )}
+        
         {/* Character Image */}
-        <div className="relative w-full aspect-square bg-gradient-to-br from-purple-100 to-blue-100">
-          {character.image_url ? (
+        <div className="relative w-full aspect-square bg-gradient-to-br from-purple-100 to-blue-100 overflow-hidden">
+          {hasImage ? (
             <img
-              src={character.image_url}
+              src={character.imageUrl}
               alt={character.name}
-              className="w-full h-full object-cover"
+              className="w-full h-full object-cover transition-opacity duration-500"
+              style={{ opacity: 1 }}
             />
           ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <Loader2 className="w-12 h-12 animate-spin text-gray-400" />
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3">
+              {isStreaming ? (
+                <>
+                  <div className="relative">
+                    <div className="absolute inset-0 bg-blue-400/20 rounded-full animate-ping" style={{ animationDuration: '1.5s' }} />
+                    <Loader2 className="w-12 h-12 animate-spin text-blue-500 relative z-10" />
+                  </div>
+                  <span className="text-sm text-gray-500 font-medium">正在绘制...</span>
+                </>
+              ) : (
+                <>
+                  <div className="w-16 h-16 rounded-full bg-gray-200 flex items-center justify-center">
+                    <span className="text-2xl">🎨</span>
+                  </div>
+                  <span className="text-sm text-gray-400">等待生成</span>
+                </>
+              )}
+            </div>
+          )}
+          
+          {/* Completion checkmark */}
+          {hasImage && (
+            <div className="absolute bottom-2 right-2 bg-green-500 text-white w-6 h-6 rounded-full flex items-center justify-center shadow-lg">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
             </div>
           )}
         </div>
 
         {/* Character Info */}
         <div className="p-4 flex-1 flex flex-col">
-          <h3 className="font-bold text-xl text-gray-800 mb-2">{character.name}</h3>
           {character.description && (
             <p className="text-sm text-gray-600 line-clamp-4">{character.description}</p>
+          )}
+          {!character.description && (
+            <p className="text-sm text-gray-400 italic">暂无描述</p>
           )}
         </div>
       </HTMLContainer>

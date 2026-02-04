@@ -16,28 +16,31 @@ from ..services.storage_service import get_image_url_from_asset_id
 
 @tool
 async def generate_character_portrait(
-    description: str, 
-    character_name: str = ""
+    description: str,
+    character_name: str = "",
+    character_index: int = 0
 ) -> Dict[str, str]:
     """
     Generate character portrait image, auto-saves to Supabase.
-    
+
     Args:
         description: Detailed physical description of the character
         character_name: Name for reference
-        
+        character_index: Index in the characters array (0-based)
+
     Returns:
-        Dict with name, image_id, and image_url
+        Dict with name, image_id, image_url, and index
     """
     prompt = f"Character portrait: {description}. Studio lighting, white background, full body shot. No text, no distortions."
-    
+
     image_id = await google_text_to_image(prompt=prompt, return_id=True)
     image_url = await get_image_url_from_asset_id(image_id)
-    
+
     return {
         "name": character_name,
-        "image_id": image_id, 
-        "image_url": image_url
+        "image_id": image_id,
+        "image_url": image_url,
+        "index": character_index
     }
 
 

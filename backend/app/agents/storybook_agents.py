@@ -74,7 +74,7 @@ def create_enhance_agent():
     """
     Enhance Agent: Story enhancement specialist.
     
-    Tools: user_interaction, escalate
+    Tools: present_enhanced_story, escalate
     Role: Enhance story ideas with vivid details
     """
     model = get_gemini_model()
@@ -130,7 +130,7 @@ def create_portrait_agent():
     """
     Portrait Agent: Character portrait specialist.
     
-    Tools: generate_character_portrait, user_interaction, escalate
+    Tools: generate_character_portrait, escalate
     Role: Generate portrait images for each character
     """
     model = get_gemini_model()
@@ -141,6 +141,8 @@ YOUR JOB:
 1. Generate portrait image for EACH character
 2. Show each portrait as it's ready (state updates automatically)
 3. Output text to prompt user for review
+4. Make sure everything is writeen in user's language
+
 
 YOUR TOOLS:
 - generate_character_portrait: Creates portrait, auto-updates state with image_url
@@ -152,9 +154,9 @@ WORKFLOW:
    generate_character_portrait(
        description=character["description"],
        character_name=character["name"],
-       character_index=character["index"]  # IMPORTANT: Pass the index!
+       character_index=character["index"]  
    )
-3. After all portraits are generated, output text to prompt user:
+3. After all portraits are generated, output text to prompt user in their prefered language:
    "I've generated portraits for all X characters. Please review and approve to continue to story pages."
 
 IMPORTANT:
@@ -177,48 +179,35 @@ IMPORTANT:
 
 def create_story_agent():
     """
-    Story Agent: Storybook illustrator and saver.
+    Story Agent: Storybook illustrator.
     
-    Tools: generate_page_image, save_storybook, user_interaction, escalate
-    Role: Create page illustrations and save final storybook
+    Tools: generate_page_image, escalate
+    Role: Create page illustrations for the storybook
     """
     model = get_gemini_model()
     
     prompt = """You are a Storybook Illustrator.
 
 YOUR JOB:
-1. Break story into 6-12 pages
-2. Generate illustration for each page using generate_page_image
-3. Show pages as they're ready (state updates automatically)
-4. Save complete storybook to database
-5. Ask for final approval
+Create beautiful illustrated pages for the storybook. Each page you generate appears immediately to the user.
 
 YOUR TOOLS:
-- generate_page_image: Creates page illustration, auto-updates state
-- save_storybook: Saves to database when all pages ready
-- user_interaction: Get user feedback
-- escalate: If user wants to change direction
+- generate_page_image(prompt, reference_image_ids, page_number): Creates a page illustration
+- escalate: If user wants to change direction completely
 
-WORKFLOW:
-1. Read story and character image_ids from conversation history
-2. Plan 6-12 page breakdown with plot for each page
-3. Generate pages one by one (use character image_ids for consistency!):
-   generate_page_image(prompt="scene description", reference_image_ids=[char_ids], page_number=1)
-4. After all pages ready, save storybook:
-   save_storybook(title="...", description="...", pages=[...])
-5. Call:
-   user_interaction(
-       type="pages_review",
-       intention="next",
-       prompt="Please review the complete storybook. Approve to finish."
-   )
+BEFORE GENERATING:
+First discuss with the user:
+- How many pages you plan to create (typically 6-12)
+- The illustration style you'll use (watercolor, cartoon, realistic, etc.)
+- Brief overview of what each page will show
 
-IMPORTANT:
-- Frontend sees pages appear one by one as you create them (via state updates)
-- Each generate_page_image call updates state.pages automatically
-- Use character image_ids for visual consistency across pages
-- Frontend reads pages from state, not from this tool
-- Save storybook before final approval"""
+Wait for user's confirmation before generating pages, if any issues, report to user.
+
+WHEN GENERATING:
+- Use character image_ids from conversation for visual consistency
+- Call generate_page_image for each page in order with descriptive prompts
+
+USE USER'S LANGUAGE for all communication."""
     
     return create_react_agent(
         model=model,

@@ -6,7 +6,7 @@ import {
 import { HttpAgent } from "@ag-ui/client";
 import { NextRequest } from "next/server";
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8005";
 
 const serviceAdapter = new ExperimentalEmptyAdapter();
 

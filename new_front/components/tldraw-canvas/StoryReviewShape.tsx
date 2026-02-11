@@ -9,6 +9,7 @@ declare module 'tldraw' {
       enhancedStory?: string;
       enhancedStoryPartial?: string;
       characters: Array<{
+        index?: number;
         name: string;
         description?: string;
         imageId?: string;
@@ -30,6 +31,7 @@ export class StoryReviewShapeUtil extends ShapeUtil<IStoryReviewShape> {
     enhancedStory: T.string.optional(),
     enhancedStoryPartial: T.string.optional(),
     characters: T.arrayOf(T.object({
+      index: T.number.optional(),
       name: T.string,
       description: T.string.optional(),
       imageId: T.string.optional(),

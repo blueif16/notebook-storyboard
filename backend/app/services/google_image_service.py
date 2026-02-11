@@ -65,13 +65,16 @@ class GoogleImageService:
         }
 
         # 添加图像配置
-        if aspect_ratio or resolution:
+        # Note: imageSize is only supported by gemini-3-* models
+        supports_image_size = "gemini-3" in model
+        if aspect_ratio or (resolution and supports_image_size):
             image_config: dict[str, str] = {}
             if aspect_ratio:
                 image_config["aspectRatio"] = aspect_ratio
-            if resolution:
+            if resolution and supports_image_size:
                 image_config["imageSize"] = resolution
-            generation_config["imageConfig"] = image_config
+            if image_config:  # Only add if we have at least one property
+                generation_config["imageConfig"] = image_config
 
         payload["generationConfig"] = generation_config
 

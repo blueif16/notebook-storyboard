@@ -76,7 +76,7 @@ VIDEO_DEFAULT_INFERENCE_STEPS = int(
 # API 配置
 # ============================================
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
-API_PORT = int(os.getenv("API_PORT", "8000"))
+API_PORT = int(os.getenv("API_PORT", "8005"))
 DEBUG = os.getenv("DEBUG", "True").lower() == "true"
 
 # CORS 配置

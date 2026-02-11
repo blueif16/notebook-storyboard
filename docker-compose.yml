@@ -7,10 +7,10 @@ services:
       dockerfile: Dockerfile
     container_name: mynotebook-backend
     ports:
-      - "8000:8000"
+      - "8005:8005"
     environment:
       - API_HOST=0.0.0.0
-      - API_PORT=8000
+      - API_PORT=8005
       - ALLOWED_ORIGINS=http://localhost:3000,http://frontend:3000
     volumes:
       - ./backend/data:/app/data
@@ -19,7 +19,7 @@ services:
       - mynotebook-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -34,7 +34,7 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8005
       - HYPERBROWSER_API_KEY=${HYPERBROWSER_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENAI_SUMMARY_MODEL=${OPENAI_SUMMARY_MODEL}

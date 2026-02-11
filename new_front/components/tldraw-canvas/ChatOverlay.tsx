@@ -30,23 +30,31 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
     msg.content && (typeof msg.content === 'string' ? msg.content.trim() : true)
   )
 
-  // 使用 useLangGraphInterrupt 处理 interrupt
+  // Handle ONLY non-text interrupts (story_review, character_review, pages_review)
+  // Text interrupts are handled naturally by the chat flow - user's next message resumes the graph.
+  //
+  // IMPORTANT: Using `enabled` to filter out text interrupts prevents CopilotKit from
+  // auto-triggering new runs when we don't call resolve().
+  //
   useLangGraphInterrupt<InterruptData>({
+    enabled: ({ eventValue }) => {
+      // Only handle non-text interrupts
+      const shouldHandle = eventValue?.type !== 'text'
+      logger.info('useLangGraphInterrupt enabled check', {
+        type: eventValue?.type,
+        enabled: shouldHandle
+      })
+      return shouldHandle
+    },
     handler: ({ event, resolve }) => {
       const interruptData = event.value
-      logger.info('收到 interrupt 事件', interruptData)
+      logger.info('收到需要处理的 interrupt 事件', interruptData)
 
       const { type } = interruptData
 
-      // 只保存 type 和 resolve 函数
-      // 文本内容已经通过消息流显示了
-      if (type !== 'text') {
-        setCurrentInterrupt({ type, resolve })
-        logger.info('设置当前 interrupt', { type })
-      } else {
-        // type="text" 不需要任何交互，直接 resolve
-        resolve('CONTINUE')
-      }
+      // Store the resolve function so we can show approval UI
+      setCurrentInterrupt({ type, resolve })
+      logger.info('设置当前 interrupt (需要用户批准)', { type })
     }
   })
 
@@ -81,14 +89,21 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
   }, [displayMessages, currentInterrupt, isMinimized])
 
   const handleSend = async () => {
-    if (!input.trim()) return
+    // Guard: Don't send if empty or already loading
+    if (!input.trim() || isLoading) {
+      if (isLoading) {
+        logger.warn('已阻止发送 - 上一个请求仍在进行中')
+      }
+      return
+    }
 
     const messageContent = input
     setInput('')
 
     logger.info('用户发送消息', {
       content: messageContent,
-      threadId
+      threadId,
+      isLoading
     })
 
     try {
@@ -219,7 +234,8 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
           <div className="p-4 bg-white border-t border-gray-100">
             <div className="relative">
               <button
-                className="absolute left-2 bottom-3 p-1.5 text-gray-400 hover:text-gray-600"
+                className="absolute left-2 bottom-3 p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-50"
+                disabled={isLoading}
               >
                 <Paperclip size={18} />
               </button>
@@ -227,13 +243,15 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="描述你的故事..."
-                className="w-full pl-12 pr-12 py-4 bg-transparent border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all text-sm"
+                onKeyDown={(e) => e.key === 'Enter' && !isLoading && handleSend()}
+                placeholder={isLoading ? "正在处理..." : "描述你的故事..."}
+                disabled={isLoading}
+                className="w-full pl-12 pr-12 py-4 bg-transparent border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 transition-all text-sm disabled:opacity-50 disabled:cursor-not-allowed"
               />
               <button
                 onClick={handleSend}
-                className="absolute right-2 bottom-3 p-1.5 text-gray-400 hover:text-blue-600"
+                disabled={isLoading || !input.trim()}
+                className="absolute right-2 bottom-3 p-1.5 text-gray-400 hover:text-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <ArrowUp size={18} />
               </button>

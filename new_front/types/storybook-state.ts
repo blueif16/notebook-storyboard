@@ -15,7 +15,7 @@ export interface Character {
 
 export interface Page {
   pageNumber: number;
-  plot?: string;
+  prompt?: string;  // Scene description from generate_page_image tool
   imageId?: string;
   imageUrl?: string;
 }
@@ -38,8 +38,9 @@ export interface StorybookState {
   pagesPartial?: Page[];
   isStreaming?: boolean;
   
-  // Portrait generation tracking
+  // Generation tracking
   portraitGeneratingIndex?: number;
+  pageGeneratingIndex?: number;
 
   // Metadata
   currentStage?: "orchestrator" | "enhance" | "portrait" | "story";
@@ -63,6 +64,7 @@ export const initialStorybookState: StorybookState = {
   reviewType: "",
   isStreaming: false,
   portraitGeneratingIndex: -1,
+  pageGeneratingIndex: -1,
   enhancedStoryPartial: "",
   charactersPartial: [],
 };

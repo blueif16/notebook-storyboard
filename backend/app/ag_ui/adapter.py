@@ -21,7 +21,7 @@ from ..graphs import get_graph
 
 SSE_CONTENT_TYPE = "text/event-stream"
 
-# Stage to review type mapping
+# Stage to review type mapping (used for UI inference)
 STAGE_TO_REVIEW_TYPE = {
     "enhance": "story_review",
     "portrait": "character_review",
@@ -207,6 +207,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
     
     # Track pages generation state
     pages_review_emitted = False  # Track if we've emitted pages_review
+    page_generating_count = 0  # Track number of pages being generated
 
     # Extract resume from forwarded_props (CopilotKit sends it here)
     resume_value = None
@@ -265,6 +266,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
         "reviewType": "",
         "isStreaming": False,
         "portraitGeneratingIndex": -1,
+        "pageGeneratingIndex": -1,
         "enhancedStory": "",
         "enhancedStoryPartial": "",
         "charactersPartial": [],
@@ -316,21 +318,80 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
 
         print(f"[AG-UI Stream] Starting graph execution...")
 
-        # Check if this is a resume from interrupt
-        if resume_value:
+        # Check if there's an active interrupt on this thread
+        has_active_interrupt = False
+        active_interrupt_type = None
+        try:
+            state_snapshot = graph.get_state(config)
+            if state_snapshot and hasattr(state_snapshot, 'tasks') and state_snapshot.tasks:
+                for task in state_snapshot.tasks:
+                    if hasattr(task, 'interrupts') and task.interrupts:
+                        has_active_interrupt = True
+                        interrupt_obj = task.interrupts[0]
+                        interrupt_value = interrupt_obj.value if hasattr(interrupt_obj, 'value') else {}
+                        active_interrupt_type = interrupt_value.get("type")
+                        print(f"[AG-UI Stream] 🔄 Detected active interrupt on thread")
+                        print(f"[AG-UI Stream]   interrupt type: {active_interrupt_type}")
+                        break
+        except Exception as e:
+            print(f"[AG-UI Stream] Warning: Could not check for active interrupt: {e}")
+
+        # Use resume if there's explicit resume value OR active interrupt
+        if resume_value or has_active_interrupt:
+            actual_resume = resume_value or latest_user_message
             print(f"[AG-UI Stream] Resuming from interrupt")
-            print(f"[AG-UI Stream]   resume value: {resume_value}")
+            print(f"[AG-UI Stream]   resume value: {actual_resume[:100] if actual_resume else 'None'}...")
+            print(f"[AG-UI Stream]   interrupt type: {active_interrupt_type}")
+            
             from langgraph.types import Command
-            # 直接传递 resume 值（如 "APPROVED" 或用户反馈）
-            event_stream = graph.astream_events(
-                Command(resume=resume_value),
-                config=config,
-                version="v2"
-            )
+            
+            # For review interrupts with APPROVED, set a flag so node can skip subgraph re-run
+            # The data (enhanced_story, characters, pages) is in the interrupt payload
+            state_update = {}
+            if active_interrupt_type in ["story_review", "character_review", "pages_review"]:
+                if resume_value == "APPROVED":
+                    # Extract data from interrupt payload to persist in state
+                    try:
+                        state_snapshot = graph.get_state(config)
+                        if state_snapshot and hasattr(state_snapshot, 'tasks') and state_snapshot.tasks:
+                            for task in state_snapshot.tasks:
+                                if hasattr(task, 'interrupts') and task.interrupts:
+                                    interrupt_obj = task.interrupts[0]
+                                    interrupt_value = interrupt_obj.value if hasattr(interrupt_obj, 'value') else {}
+                                    interrupt_data = interrupt_value.get("data", {})
+                                    
+                                    # Set the flag and data so node can skip subgraph
+                                    state_update["review_type"] = active_interrupt_type
+                                    if interrupt_data.get("enhanced_story"):
+                                        state_update["enhanced_story"] = interrupt_data["enhanced_story"]
+                                    if interrupt_data.get("characters"):
+                                        state_update["characters"] = interrupt_data["characters"]
+                                    if interrupt_data.get("pages"):
+                                        state_update["pages"] = interrupt_data["pages"]
+                                    break
+                        print(f"[AG-UI Stream] 📦 Extracted interrupt data for state: {list(state_update.keys())}")
+                    except Exception as e:
+                        print(f"[AG-UI Stream] Warning: Could not extract interrupt data: {e}")
+            
+            # Pass resume value with optional state update
+            # Node checks review_type to decide whether to skip subgraph
+            print(f"[AG-UI Stream] 📤 Passing resume to node (node handles routing)")
+            if state_update:
+                print(f"[AG-UI Stream]   with state_update: {list(state_update.keys())}")
+                event_stream = graph.astream_events(
+                    Command(update=state_update, resume=actual_resume),
+                    config=config,
+                    version="v2"
+                )
+            else:
+                event_stream = graph.astream_events(
+                    Command(resume=actual_resume),
+                    config=config,
+                    version="v2"
+                )
         else:
-            # Continue conversation or start new one
-            # LangGraph will automatically restore state from checkpointer if thread_id exists
-            print(f"[AG-UI Stream] Continuing conversation with new message")
+            # No active interrupt - start fresh or continue conversation
+            print(f"[AG-UI Stream] Starting fresh conversation (no active interrupt)")
             event_stream = graph.astream_events(
                 {"messages": [{"role": "user", "content": latest_user_message}]},
                 config=config,
@@ -400,6 +461,49 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                         ))
                         except Exception as e:
                             print(f"[AG-UI Stream] Warning: Could not sync state on portrait transition: {e}")
+                    
+                    # When transitioning TO story, the portrait Command has now been processed
+                    # Query graph state to get the characters with image_ids
+                    if current_stage == "story" and previous_stage == "portrait":
+                        try:
+                            graph = get_graph()
+                            config = {"configurable": {"thread_id": thread_id}}
+                            current_graph_state = graph.get_state(config)
+                            if current_graph_state and current_graph_state.values:
+                                vals = current_graph_state.values
+                                characters = vals.get("characters", [])
+                                enhanced_story = vals.get("enhanced_story", "")
+                                print(f"[AG-UI Stream] 📚 Transition to story - syncing state:")
+                                print(f"[AG-UI Stream]   characters: {len(characters)} items")
+                                print(f"[AG-UI Stream]   characters with images: {sum(1 for c in characters if c.get('image_id'))}")
+                                print(f"[AG-UI Stream]   enhanced_story: {len(enhanced_story or '')} chars")
+                                
+                                if characters or enhanced_story:
+                                    sync_patches = []
+                                    if enhanced_story:
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/enhancedStory",
+                                            "value": enhanced_story
+                                        })
+                                    if characters:
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/characters",
+                                            "value": characters
+                                        })
+                                        sync_patches.append({
+                                            "op": "replace",
+                                            "path": "/charactersCount",
+                                            "value": len(characters)
+                                        })
+                                    if sync_patches:
+                                        yield encoder.encode(StateDeltaEvent(
+                                            type=EventType.STATE_DELTA,
+                                            delta=sync_patches
+                                        ))
+                        except Exception as e:
+                            print(f"[AG-UI Stream] Warning: Could not sync state on story transition: {e}")
 
             # Stream LLM tokens
             if event_type == "on_chat_model_stream":
@@ -562,6 +666,9 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                 
                 # Detect page generation start
                 elif tool_name == "generate_page_image":
+                    page_generating_count += 1
+                    
+                    # Emit pages_review type on first page generation
                     if not pages_review_emitted:
                         print(f"[AG-UI Stream] 📄 First page generation starting - emitting pages_review")
                         yield encoder.encode(StateDeltaEvent(
@@ -576,10 +683,25 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                     "op": "replace",
                                     "path": "/isStreaming",
                                     "value": True
+                                },
+                                {
+                                    "op": "replace",
+                                    "path": "/pageGeneratingIndex",
+                                    "value": page_generating_count - 1
                                 }
                             ]
                         ))
                         pages_review_emitted = True
+                    else:
+                        # Update which page is generating
+                        yield encoder.encode(StateDeltaEvent(
+                            type=EventType.STATE_DELTA,
+                            delta=[{
+                                "op": "replace",
+                                "path": "/pageGeneratingIndex",
+                                "value": page_generating_count - 1
+                            }]
+                        ))
 
             # Emit state deltas for tool completions
             elif event_type == "on_tool_end":
@@ -706,7 +828,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                         "pageNumber": page_number,
                                         "imageId": image_id,
                                         "imageUrl": image_url,
-                                        "plot": tool_input.get("plot", "")
+                                        "prompt": tool_input.get("prompt", "")  # Scene description
                                     }
                                 }]
                             ))
@@ -764,7 +886,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                 type=EventType.RUN_FINISHED,
                                 thread_id=thread_id,
                                 run_id=run_id,
-                                outcome="interrupt"
+                                # outcome="interrupt"
                             ))
                         else:
                             # Other interrupt types: need user approval, send CustomEvent
@@ -781,7 +903,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                 type=EventType.RUN_FINISHED,
                                 thread_id=thread_id,
                                 run_id=run_id,
-                                outcome="interrupt"
+                                # outcome="interrupt"
                             ))
 
                         print(f"[AG-UI Stream] Interrupt events sent, waiting for resume...")
@@ -856,7 +978,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                     type=EventType.RUN_FINISHED,
                                     thread_id=thread_id,
                                     run_id=run_id,
-                                    outcome="interrupt"
+                                    # outcome="interrupt"
                                 ))
                             else:
                                 # Other interrupt types - send CustomEvent for approval UI
@@ -871,7 +993,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                                     type=EventType.RUN_FINISHED,
                                     thread_id=thread_id,
                                     run_id=run_id,
-                                    outcome="interrupt"
+                                    # outcome="interrupt"
                                 ))
 
                             print(f"[AG-UI Stream] Interrupt handled, waiting for resume...\n")
@@ -887,7 +1009,7 @@ async def run_storybook_stream(input_data: RunAgentInput) -> AsyncGenerator[str,
                 type=EventType.RUN_FINISHED,
                 thread_id=thread_id,
                 run_id=run_id,
-                outcome="interrupt"
+                # outcome="interrupt"
             ))
             return
 

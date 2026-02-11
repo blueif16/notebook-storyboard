@@ -22,7 +22,12 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
   static override props: RecordProps<IPageShape> = {
     w: T.number,
     h: T.number,
-    page: T.object as any,
+    page: T.object({
+      pageNumber: T.number,
+      prompt: T.string.optional(),
+      imageId: T.string.optional(),
+      imageUrl: T.string.optional(),
+    }),
     isReviewMode: T.boolean.optional(),
     isStreaming: T.boolean.optional(),
   }
@@ -31,7 +36,7 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
     return {
       w: 400,
       h: 500,
-      page: { pageNumber: 1, plot: '', imageUrl: '' },
+      page: { pageNumber: 1, prompt: '', imageUrl: '' },
       isReviewMode: false,
       isStreaming: false
     }
@@ -84,9 +89,9 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
               <div className="text-sm font-semibold mb-1">
                 第 {page.pageNumber} 页
               </div>
-              {page.plot && (
+              {page.prompt && (
                 <p className="text-xs text-gray-600">
-                  {page.plot}
+                  {page.prompt}
                 </p>
               )}
             </div>
@@ -152,10 +157,10 @@ export class PageShapeUtil extends ShapeUtil<IPageShape> {
 
         {/* Page Info */}
         <div className="p-4 bg-white border-t border-gray-200">
-          {page.plot && (
-            <p className="text-sm text-gray-700 line-clamp-3">{page.plot}</p>
+          {page.prompt && (
+            <p className="text-sm text-gray-700 line-clamp-3">{page.prompt}</p>
           )}
-          {!page.plot && (
+          {!page.prompt && (
             <p className="text-sm text-gray-400 italic">暂无剧情描述</p>
           )}
         </div>

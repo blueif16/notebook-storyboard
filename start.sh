@@ -60,8 +60,8 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-# Start Unified Backend (port 8000)
-echo -e "${GREEN}Starting Unified Backend Server (port 8000)...${NC}"
+# Start Unified Backend (port 8005)
+echo -e "${GREEN}Starting Unified Backend Server (port 8005)...${NC}"
 echo -e "${BLUE}Handles REST API + AG-UI Streaming${NC}"
 cd "$BACKEND_DIR"
 python run_server.py 2>&1 | sed "s/^/[${YELLOW}BACKEND${NC}] /" &
@@ -79,9 +79,9 @@ FRONTEND_PID=$!
 echo -e "\n${BLUE}========================================${NC}"
 echo -e "${GREEN}HyperBookLM is running!${NC}"
 echo -e "${BLUE}========================================${NC}"
-echo -e "Backend:         http://localhost:8000"
-echo -e "API Docs:        http://localhost:8000/docs"
-echo -e "AG-UI Stream:    http://localhost:8000/storybook"
+echo -e "Backend:         http://localhost:8005"
+echo -e "API Docs:        http://localhost:8005/docs"
+echo -e "AG-UI Stream:    http://localhost:8005/storybook"
 echo -e "Frontend:        http://localhost:3848"
 echo -e "\nPress Ctrl+C to stop all services"
 echo -e "${BLUE}========================================${NC}\n"

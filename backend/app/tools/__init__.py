@@ -1,15 +1,14 @@
 """Tools Module - V2 Architecture
 
 Tool organization:
-- hitl_tools: user_interaction, escalate
-- story_tools: generate_character_portrait, generate_page_image, save_storybook
+- hitl_tools: escalate, present_enhanced_story
+- story_tools: generate_character_portrait, generate_page_image
 """
 
-from .hitl_tools import user_interaction, escalate, present_enhanced_story
+from .hitl_tools import escalate, present_enhanced_story
 from .story_tools import (
     generate_character_portrait,
     generate_page_image,
-    save_storybook,
 )
 
 
@@ -30,24 +29,20 @@ PORTRAIT_TOOLS = [
     escalate,
 ]
 
-# Story Agent: page generation, saving, + HITL
+# Story Agent: page generation only (no save_storybook - pages saved to state automatically)
 STORY_TOOLS = [
     generate_page_image,
-    save_storybook,
-    user_interaction,
     escalate,
 ]
 
 
 __all__ = [
     # HITL tools
-    "user_interaction",
     "escalate",
     "present_enhanced_story",
     # Functional tools
     "generate_character_portrait",
     "generate_page_image",
-    "save_storybook",
     # Tool sets
     "ENHANCE_TOOLS",
     "PORTRAIT_TOOLS",

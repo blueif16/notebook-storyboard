@@ -189,7 +189,7 @@ async def image_gen_service(
 async def image_to_image_gen_service(
     prompt: str,
     image_asset_id,
-    aspect_ratio: str = "9:16",
+    aspect_ratio: str = "16:9",
     return_id: bool = False
 ) -> str:
     """Generate an image from reference image(s)

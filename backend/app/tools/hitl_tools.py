@@ -69,6 +69,27 @@ def present_enhanced_story(enhanced_story: str, characters: list[dict]) -> dict:
 
 
 @tool
+def present_style_options(style_keys: list[str]) -> dict:
+    """
+    Present illustration style options to user for selection.
+
+    Call this with the keys of styles you recommend from the catalog.
+    The system will resolve keys to full style cards with sample images.
+
+    Args:
+        style_keys: List of style catalog keys to present.
+            Example: ["watercolor", "cartoon", "digital_painting"]
+
+    Returns:
+        Confirmation with selected keys
+    """
+    return {
+        "status": "ready_for_review",
+        "selected_keys": style_keys,
+    }
+
+
+@tool
 def escalate(reason: str) -> str:
     """
     Exit current stage and return to orchestrator.

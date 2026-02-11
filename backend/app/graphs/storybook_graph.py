@@ -21,6 +21,7 @@ from operator import add as list_add  # For append-only reducer
 
 from .routing import get_tool_call, get_tool_result, NEXT_STAGE
 from ..agents import AgentCache, get_gemini_model
+from ..services.style_catalog_service import get_all_styles, get_styles_by_keys
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 @tool
 def route_to_stage(
-    stage: Literal["enhance", "portrait", "story"],
+    stage: Literal["enhance", "style", "portrait", "story"],
     reason: str
 ) -> str:
     """Route to specified stage."""
@@ -54,14 +55,18 @@ class StorybookState(TypedDict):
     pages: Annotated[list, list_add]         # [{page_number, image_id, image_url}] - APPEND reducer
     storybook_id: Annotated[Optional[str], last_value]
 
+    # Style
+    style_prompt: Annotated[Optional[str], last_value]  # Locked illustration style description
+
     # Metadata
     current_stage: Annotated[Optional[str], last_value]
-    review_type: Annotated[Optional[str], last_value]  # "story_review" | "character_review" | "pages_review"
-    
+    review_type: Annotated[Optional[str], last_value]  # "story_review" | "character_review" | "style_review" | "pages_review"
+
     # Per-stage conversation histories (isolated contexts)
     # Each stage has its own conversation that persists across text interrupts
     enhance_conversation: Annotated[list, last_value]  # Enhance stage conversation
-    portrait_conversation: Annotated[list, last_value]  # Portrait stage conversation  
+    style_conversation: Annotated[list, last_value]    # Style stage conversation
+    portrait_conversation: Annotated[list, last_value]  # Portrait stage conversation
     story_conversation: Annotated[list, last_value]    # Story stage conversation
 
 
@@ -71,6 +76,10 @@ class EnhanceState(TypedDict):
 
 
 class PortraitState(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+class StyleState(TypedDict):
     messages: Annotated[list, add_messages]
 
 
@@ -151,6 +160,28 @@ def route_portrait_subgraph(state: PortraitState) -> Literal["agent", "__end__"]
     return "agent"
 
 
+def route_style_subgraph(state: StyleState) -> Literal["agent", "__end__"]:
+    """Route within style subgraph."""
+    messages = state["messages"]
+
+    if get_tool_call(messages, "escalate"):
+        logger.info("[STYLE SUBGRAPH] Escalate → exit")
+        return "__end__"
+
+    if get_tool_call(messages, "present_style_options"):
+        logger.info("[STYLE SUBGRAPH] Style options presented → exit")
+        return "__end__"
+
+    if messages:
+        last_msg = messages[-1]
+        if hasattr(last_msg, "type") and last_msg.type == "ai":
+            if not (hasattr(last_msg, "tool_calls") and last_msg.tool_calls):
+                logger.info("[STYLE SUBGRAPH] AI finished (no tool calls) → exit")
+                return "__end__"
+
+    return "agent"
+
+
 def route_story_subgraph(state: StoryState) -> Literal["agent", "__end__"]:
     """Route within story subgraph."""
     messages = state["messages"]
@@ -193,11 +224,25 @@ def build_portrait_subgraph():
         agent = AgentCache.get_agent("portrait")
         result = await agent.ainvoke({"messages": state["messages"]})
         return {"messages": result["messages"]}
-    
+
     builder = StateGraph(PortraitState)
     builder.add_node("agent", portrait_agent_node)
     builder.add_edge(START, "agent")
     builder.add_conditional_edges("agent", route_portrait_subgraph, {"agent": "agent", "__end__": END})
+    return builder.compile()
+
+
+def build_style_subgraph():
+    async def style_agent_node(state: StyleState) -> dict:
+        logger.info("[STYLE AGENT] Processing...")
+        agent = AgentCache.get_agent("style")
+        result = await agent.ainvoke({"messages": state["messages"]})
+        return {"messages": result["messages"]}
+
+    builder = StateGraph(StyleState)
+    builder.add_node("agent", style_agent_node)
+    builder.add_edge(START, "agent")
+    builder.add_conditional_edges("agent", route_style_subgraph, {"agent": "agent", "__end__": END})
     return builder.compile()
 
 
@@ -218,6 +263,7 @@ def build_story_subgraph():
 # Cache subgraphs
 _enhance_subgraph = None
 _portrait_subgraph = None
+_style_subgraph = None
 _story_subgraph = None
 
 def get_enhance_subgraph():
@@ -232,6 +278,12 @@ def get_portrait_subgraph():
         _portrait_subgraph = build_portrait_subgraph()
     return _portrait_subgraph
 
+def get_style_subgraph():
+    global _style_subgraph
+    if _style_subgraph is None:
+        _style_subgraph = build_style_subgraph()
+    return _style_subgraph
+
 def get_story_subgraph():
     global _story_subgraph
     if _story_subgraph is None:
@@ -243,7 +295,7 @@ def get_story_subgraph():
 # PARENT GRAPH NODES
 # =============================================================================
 
-async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance", "portrait", "story", "orchestrator"]]:
+async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance", "style", "portrait", "story", "orchestrator"]]:
     """
     Orchestrator: Route to stages or chat with user.
     
@@ -303,6 +355,8 @@ async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance",
                     # Reset the target stage's conversation
                     if target_stage == "enhance":
                         update["enhance_conversation"] = []
+                    elif target_stage == "style":
+                        update["style_conversation"] = []
                     elif target_stage == "portrait":
                         update["portrait_conversation"] = []
                     elif target_stage == "story":
@@ -334,7 +388,7 @@ async def orchestrator_node(state: StorybookState) -> Command[Literal["enhance",
         )
 
 
-async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "portrait", "orchestrator"]]:
+async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "style", "orchestrator"]]:
     """
     Enhance stage: Enhance story and extract characters.
     
@@ -375,9 +429,9 @@ async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "por
             logger.info(f"[ENHANCE NODE] User response: {user_response}")
 
             if user_response == "APPROVED":
-                logger.info(f"[ENHANCE NODE] APPROVED → portrait")
+                logger.info(f"[ENHANCE NODE] APPROVED → style")
                 return Command(
-                    goto="portrait",
+                    goto="style",
                     update={
                         "current_stage": "enhance",
                         "review_type": None,  # Clear review flag
@@ -454,10 +508,10 @@ async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "por
             logger.info(f"[ENHANCE NODE] User response: {user_response}")
 
             if user_response == "APPROVED":
-                # APPROVED → go to portrait stage
-                logger.info(f"[ENHANCE NODE] APPROVED → portrait")
+                # APPROVED → go to style stage
+                logger.info(f"[ENHANCE NODE] APPROVED → style")
                 return Command(
-                    goto="portrait",
+                    goto="style",
                     update={
                         "enhanced_story": enhanced_story,
                         "characters": characters_with_index,
@@ -498,6 +552,205 @@ async def enhance_node(state: StorybookState) -> Command[Literal["enhance", "por
         return Command(
             goto="orchestrator",
             update={"messages": [AIMessage(content=f"Error: {e}")], "current_stage": "enhance"}
+        )
+
+
+async def style_node(state: StorybookState) -> Command[Literal["style", "portrait", "orchestrator"]]:
+    """
+    Style stage: Fetch catalog, let agent pick keys, resolve to full entries with images.
+
+    Pattern:
+    - Text interrupt BEFORE subgraph (for conversational feedback)
+    - Style review interrupt AFTER subgraph (for selection)
+    - Check for pending review to skip subgraph on resume
+    """
+    logger.info("\n" + "="*60)
+    logger.info("[STYLE NODE] Invoked")
+
+    try:
+        style_conversation = list(state.get("style_conversation") or [])
+        existing_messages = state.get("messages", [])
+
+        logger.info(f"[STYLE NODE] Conversation history: {len(style_conversation)} messages")
+
+        # Fetch catalog once per invocation (cheap DB read)
+        catalog = await get_all_styles()
+        catalog_by_key = {s["key"]: s for s in catalog}
+        available_keys = [s["key"] for s in catalog]
+        logger.info(f"[STYLE NODE] Catalog loaded: {len(catalog)} styles")
+
+        # --- Helper: resolve keys to full style entries ---
+        async def _resolve_keys(keys: list[str]) -> list[dict]:
+            """Resolve agent-returned keys to full catalog entries."""
+            if not keys:
+                return []
+            return await get_styles_by_keys(keys)
+
+        # Check if we have a pending style review (resuming from style_review interrupt)
+        pending_review = state.get("review_type") == "style_review"
+
+        if pending_review:
+            logger.info(f"[STYLE NODE] Resuming from style_review - skipping subgraph")
+
+            # Re-extract style_keys from conversation
+            style_keys = []
+            for msg in style_conversation:
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        if tc.get("name") == "present_style_options":
+                            style_keys = tc.get("args", {}).get("style_keys", [])
+
+            resolved = await _resolve_keys(style_keys)
+
+            user_response = interrupt({
+                "type": "style_review",
+                "intention": "next",
+                "data": {
+                    "style_options": resolved
+                }
+            })
+            logger.info(f"[STYLE NODE] User response: {user_response}")
+
+            if isinstance(user_response, str) and user_response.startswith("SELECTED:"):
+                selected_key = user_response[len("SELECTED:"):]
+                selected = catalog_by_key.get(selected_key, {})
+                style_prompt = selected.get("description", selected_key)
+                logger.info(f"[STYLE NODE] Style selected ({selected_key}) → portrait")
+                return Command(
+                    goto="portrait",
+                    update={
+                        "style_prompt": style_prompt,
+                        "current_stage": "style",
+                        "review_type": None,
+                    }
+                )
+            else:
+                # Feedback - loop back
+                logger.info(f"[STYLE NODE] Feedback → style (loop)")
+                return Command(
+                    goto="style",
+                    update={
+                        "current_stage": "style",
+                        "review_type": None,
+                        "style_conversation": style_conversation + [HumanMessage(content=user_response)],
+                    }
+                )
+
+        # TEXT INTERRUPT - before subgraph (for conversational feedback)
+        if style_conversation and hasattr(style_conversation[-1], "type") and style_conversation[-1].type == "ai":
+            logger.info("[STYLE NODE] Last msg is AI - interrupt for user input first")
+            user_input = interrupt({"type": "text", "intention": "self"})
+            style_conversation.append(HumanMessage(content=user_input))
+            logger.info(f"[STYLE NODE] Got user input: {user_input[:60]}...")
+
+        # Build subgraph messages
+        if not style_conversation:
+            # First entry - build context from state, include available catalog keys
+            keys_list = ", ".join(available_keys) if available_keys else "(catalog empty)"
+            context = f"""Enhanced Story:
+{state.get('enhanced_story', '')}
+
+Characters:
+{state.get('characters', [])}
+
+Available style keys from catalog: {keys_list}
+
+Pick 3-4 styles from the catalog that best fit this story's tone and audience."""
+            subgraph_messages = [HumanMessage(content=context)]
+            logger.info(f"[STYLE NODE] First entry with context, {len(available_keys)} catalog keys")
+        else:
+            subgraph_messages = style_conversation.copy()
+            logger.info(f"[STYLE NODE] Continuation with {len(subgraph_messages)} messages")
+
+        # Invoke subgraph
+        subgraph = get_style_subgraph()
+        result = await subgraph.ainvoke({"messages": subgraph_messages})
+        new_conversation = result["messages"]
+        logger.info(f"[STYLE NODE] Subgraph returned {len(new_conversation)} messages")
+
+        # Check for present_style_options tool call
+        style_keys = []
+        options_presented = False
+
+        for msg in result["messages"]:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.get("name") == "present_style_options":
+                        options_presented = True
+                        style_keys = tc.get("args", {}).get("style_keys", [])
+                        break
+                    elif tc.get("name") == "escalate":
+                        logger.info("[STYLE NODE] Escalate → orchestrator")
+                        return Command(
+                            goto="orchestrator",
+                            update={
+                                "messages": [AIMessage(content="Escalating from style stage")],
+                                "current_stage": "style",
+                                "style_conversation": new_conversation,
+                            }
+                        )
+            if options_presented:
+                break
+
+        if options_presented and style_keys:
+            # Resolve keys to full catalog entries with image_url
+            resolved = await _resolve_keys(style_keys)
+            logger.info(f"[STYLE NODE] Resolved {len(resolved)} styles from keys: {style_keys}")
+
+            # Interrupt for user selection — frontend gets full entries with image_url
+            user_response = interrupt({
+                "type": "style_review",
+                "intention": "next",
+                "data": {
+                    "style_options": resolved
+                }
+            })
+            logger.info(f"[STYLE NODE] User response: {user_response}")
+
+            if isinstance(user_response, str) and user_response.startswith("SELECTED:"):
+                selected_key = user_response[len("SELECTED:"):]
+                selected = catalog_by_key.get(selected_key, {})
+                style_prompt = selected.get("description", selected_key)
+                logger.info(f"[STYLE NODE] Style selected ({selected_key}) → portrait")
+                return Command(
+                    goto="portrait",
+                    update={
+                        "style_prompt": style_prompt,
+                        "current_stage": "style",
+                        "style_conversation": new_conversation,
+                        "review_type": None,
+                    }
+                )
+            else:
+                # Feedback - loop back with user's message
+                logger.info(f"[STYLE NODE] Feedback → style (loop)")
+                return Command(
+                    goto="style",
+                    update={
+                        "current_stage": "style",
+                        "style_conversation": new_conversation + [HumanMessage(content=user_response)],
+                        "review_type": None,
+                    }
+                )
+        else:
+            # No options yet - loop back
+            logger.info(f"[STYLE NODE] No options yet, loop back")
+            return Command(
+                goto="style",
+                update={
+                    "current_stage": "style",
+                    "style_conversation": new_conversation,
+                }
+            )
+
+    except GraphInterrupt:
+        logger.info(f"[STYLE NODE] Interrupted")
+        raise
+    except Exception as e:
+        logger.error(f"[STYLE NODE] Error: {e}", exc_info=True)
+        return Command(
+            goto="orchestrator",
+            update={"messages": [AIMessage(content=f"Error: {e}")], "current_stage": "style"}
         )
 
 
@@ -568,12 +821,14 @@ async def portrait_node(state: StorybookState) -> Command[Literal["portrait", "s
         # Build subgraph messages
         if not portrait_conversation:
             # First entry - build context from state
+            style_prompt = state.get('style_prompt', '')
+            style_note = f"\nIllustration Style: {style_prompt}\n" if style_prompt else ""
             context = f"""Enhanced Story:
 {state.get('enhanced_story', '')}
 
 Characters to create portraits for:
 {state.get('characters', [])}
-
+{style_note}
 Generate portrait image for each character."""
             subgraph_messages = [HumanMessage(content=context)]
             logger.info(f"[PORTRAIT NODE] First entry with {len(state.get('characters', []))} characters")
@@ -581,9 +836,13 @@ Generate portrait image for each character."""
             subgraph_messages = portrait_conversation.copy()
             logger.info(f"[PORTRAIT NODE] Continuation with {len(subgraph_messages)} messages")
 
-        # Invoke subgraph
+        # Invoke subgraph - style injected via config so tools read it automatically
         subgraph = get_portrait_subgraph()
-        result = await subgraph.ainvoke({"messages": subgraph_messages})
+        style_prompt = state.get('style_prompt', '')
+        result = await subgraph.ainvoke(
+            {"messages": subgraph_messages},
+            config={"configurable": {"style_prompt": style_prompt}},
+        )
         new_conversation = result["messages"]
         logger.info(f"[PORTRAIT NODE] Subgraph returned {len(new_conversation)} messages")
 
@@ -724,12 +983,14 @@ async def story_node(state: StorybookState) -> Command[Literal["story", "orchest
         # Build subgraph messages
         if not story_conversation:
             # First entry - build context from state
+            style_prompt = state.get('style_prompt', '')
+            style_note = f"\nIllustration Style: {style_prompt}\n" if style_prompt else ""
             context = f"""Enhanced Story:
 {state.get('enhanced_story', '')}
 
 Characters (use their image_ids for visual consistency in pages):
 {state.get('characters', [])}
-
+{style_note}
 Discuss your page plan with the user before generating."""
             subgraph_messages = [HumanMessage(content=context)]
             logger.info(f"[STORY NODE] First entry with context")
@@ -738,9 +999,13 @@ Discuss your page plan with the user before generating."""
             logger.info(f"[STORY NODE] Continuation with {len(subgraph_messages)} messages")
             logger.info(f"[STORY NODE] Messages:\n{format_messages_for_log(subgraph_messages)}")
 
-        # Invoke subgraph
+        # Invoke subgraph - style injected via config so tools read it automatically
         subgraph = get_story_subgraph()
-        result = await subgraph.ainvoke({"messages": subgraph_messages})
+        style_prompt = state.get('style_prompt', '')
+        result = await subgraph.ainvoke(
+            {"messages": subgraph_messages},
+            config={"configurable": {"style_prompt": style_prompt}},
+        )
         new_conversation = result["messages"]
         logger.info(f"[STORY NODE] Subgraph returned {len(new_conversation)} messages")
 
@@ -790,16 +1055,26 @@ Discuss your page plan with the user before generating."""
             logger.info(f"[STORY NODE] User response: {user_response}")
 
             if user_response == "APPROVED":
-                # APPROVED → go back to orchestrator (story complete)
-                # NOTE: Only return new_pages - the list_add reducer will append automatically!
-                logger.info("[STORY NODE] APPROVED → orchestrator")
+                # APPROVED → feed back to agent as text, same as feedback path
+                # Agent will see approval and can finalize naturally
+                logger.info("[STORY NODE] APPROVED → story (agent finalizes)")
+                # # Old: jump straight to orchestrator, bypassing agent
+                # return Command(
+                #     goto="orchestrator",
+                #     update={
+                #         "pages": new_pages,
+                #         "current_stage": "story",
+                #         "story_conversation": new_conversation,
+                #         "messages": [AIMessage(content="Story pages completed!")],
+                #         "review_type": None,
+                #     }
+                # )
                 return Command(
-                    goto="orchestrator",
+                    goto="story",
                     update={
                         "pages": new_pages,  # Reducer appends to existing pages
                         "current_stage": "story",
-                        "story_conversation": new_conversation,
-                        "messages": [AIMessage(content="Story pages completed!")],
+                        "story_conversation": new_conversation + [HumanMessage(content=user_response)],
                         "review_type": None,
                     }
                 )
@@ -848,6 +1123,7 @@ def build_storybook_graph() -> StateGraph:
     
     builder.add_node("orchestrator", orchestrator_node)
     builder.add_node("enhance", enhance_node)
+    builder.add_node("style", style_node)
     builder.add_node("portrait", portrait_node)
     builder.add_node("story", story_node)
     

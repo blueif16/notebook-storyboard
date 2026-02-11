@@ -2,12 +2,21 @@
 
 Functional tools only - no HITL tools here.
 HITL tools moved to hitl_tools.py
+
+Style is injected via RunnableConfig["configurable"]["style_prompt"]
+so agents don't need to pass it on every call.
 """
 from typing import List, Dict, Any, Optional
 from langchain_core.tools import tool
+from langchain_core.runnables import RunnableConfig
 
 from ..services.google_image_service import google_text_to_image, google_image_to_image
 from ..services.storage_service import get_image_url_from_asset_id
+
+
+def _get_style(config: RunnableConfig) -> str:
+    """Extract style_prompt from RunnableConfig."""
+    return (config.get("configurable") or {}).get("style_prompt", "")
 
 
 # =============================================================================
@@ -19,7 +28,7 @@ async def generate_character_portrait(
     description: str,
     character_name: str = "",
     character_index: int = 0,
-
+    *, config: RunnableConfig,
 ) -> Dict[str, str]:
     """
     Generate character portrait image, auto-saves to Supabase.
@@ -32,7 +41,9 @@ async def generate_character_portrait(
     Returns:
         Dict with name, image_id, image_url, and index
     """
-    prompt = f"Character portrait: {description}. Studio lighting, white background, full body shot. No text, no distortions."
+    style = _get_style(config)
+    style_suffix = f" {style} style." if style else " Studio lighting, white background, full body shot."
+    prompt = f"Character portrait: {description}.{style_suffix} No text, no distortions."
 
     image_id = await google_text_to_image(prompt=prompt, return_id=True)
     image_url = await get_image_url_from_asset_id(image_id)
@@ -47,24 +58,27 @@ async def generate_character_portrait(
 
 @tool
 async def generate_page_image(
-    prompt: str, 
-    reference_image_ids: List[str], 
+    prompt: str,
+    reference_image_ids: List[str],
     page_number: int = 0,
     aspect_ratio: Optional[str] = "16:9",
+    *, config: RunnableConfig,
 ) -> Dict[str, str]:
     """
     Generate storybook page image with character/scene references.
-    
+
     Args:
         prompt: Scene description for the page
         reference_image_ids: Character image IDs for visual consistency
         page_number: Page number in the storybook
         aspect_ratio: If story image, then default to use "16:9"
-        
+
     Returns:
         Dict with image_id, image_url, and page_number
     """
-    enhanced_prompt = f"{prompt}. Consistent style, professional composition. No text, no distortions, no watermarks."
+    style = _get_style(config)
+    style_prefix = f"{style}. " if style else "Consistent style. "
+    enhanced_prompt = f"{style_prefix}{prompt}. Professional composition. No text, no distortions, no watermarks."
     
     # Limit references to 14 (API constraint)
     if len(reference_image_ids) > 14:

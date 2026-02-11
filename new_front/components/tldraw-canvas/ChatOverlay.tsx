@@ -4,6 +4,7 @@ import { Minimize2, Maximize2, ArrowUp, Copy, ThumbsUp, ThumbsDown, Paperclip } 
 import { useCopilotChatHeadless_c, useLangGraphInterrupt } from '@copilotkit/react-core'
 import { createLogger } from '@/lib/logger'
 import Markdown from 'react-markdown'
+import { StyleSelector } from './StyleSelector'
 
 const logger = createLogger('ChatOverlay')
 
@@ -12,7 +13,8 @@ interface ChatOverlayProps {
 }
 
 interface InterruptData {
-  type: 'text' | 'enhance_story' | 'generate_images' | 'story_review' | 'character_review' | 'pages_review';
+  type: 'text' | 'enhance_story' | 'generate_images' | 'story_review' | 'character_review' | 'style_review' | 'pages_review';
+  data?: any;
 }
 
 export function ChatOverlay({ threadId }: ChatOverlayProps) {
@@ -21,6 +23,7 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [currentInterrupt, setCurrentInterrupt] = useState<{
     type: string;
+    data?: any;
     resolve: (response: any) => void;
   } | null>(null)
   const [approvedMessageIndices, setApprovedMessageIndices] = useState<Set<number>>(new Set())
@@ -50,11 +53,11 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
       const interruptData = event.value
       logger.info('收到需要处理的 interrupt 事件', interruptData)
 
-      const { type } = interruptData
+      const { type, data } = interruptData
 
       // Store the resolve function so we can show approval UI
-      setCurrentInterrupt({ type, resolve })
-      logger.info('设置当前 interrupt (需要用户批准)', { type })
+      setCurrentInterrupt({ type, data, resolve })
+      logger.info('设置当前 interrupt (需要用户批准)', { type, data })
     }
   })
 
@@ -183,8 +186,21 @@ export function ChatOverlay({ threadId }: ChatOverlayProps) {
                       </div>
 
                       <div className="flex gap-2 mt-2">
-                        {/* Agree 按钮 - 显示当前状态或已批准状态 */}
-                        {hasActiveInterrupt && (
+                        {/* Style review - show style selector */}
+                        {hasActiveInterrupt && currentInterrupt?.type === 'style_review' && currentInterrupt.data?.style_options && (
+                          <StyleSelector
+                            options={currentInterrupt.data.style_options}
+                            onSelect={(key) => {
+                              const lastAssistantIndex = displayMessages.length - 1
+                              setApprovedMessageIndices(prev => new Set(prev).add(lastAssistantIndex))
+                              currentInterrupt.resolve(`SELECTED:${key}`)
+                              logger.info('Style selected via resolve', { key })
+                              setCurrentInterrupt(null)
+                            }}
+                          />
+                        )}
+                        {/* Agree 按钮 - 非 style_review 的其他 interrupt */}
+                        {hasActiveInterrupt && currentInterrupt?.type !== 'style_review' && (
                           <button
                             onClick={handleApprove}
                             className="px-3 py-1 text-xs bg-gray-500 hover:bg-gray-600 text-white rounded-full transition-colors"

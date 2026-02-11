@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 NEXT_STAGE = {
-    "enhance": "portrait",
+    "enhance": "style",
+    "style": "portrait",
     "portrait": "story",
     "story": "orchestrator",  # Returns to orchestrator, never ends
 }
@@ -73,7 +74,7 @@ def get_tool_result(messages: list, tool_name: str) -> Optional[str]:
 
 def route_after_stage(
     state: dict, 
-    current_stage: Literal["enhance", "portrait", "story"]
+    current_stage: Literal["enhance", "style", "portrait", "story"]
 ) -> str:
     """
     Routing logic for all stage nodes.

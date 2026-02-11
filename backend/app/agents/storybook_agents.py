@@ -10,6 +10,7 @@ import logging
 from ..config import GOOGLE_API_KEY, GEMINI_TEXT_MODEL
 from ..tools import (
     ENHANCE_TOOLS,
+    STYLE_TOOLS,
     PORTRAIT_TOOLS,
     STORY_TOOLS,
 )
@@ -49,6 +50,7 @@ class AgentCache:
             logger.info(f"[AGENT CACHE] Creating new agent: {name}")
             creators = {
                 "enhance": create_enhance_agent,
+                "style": create_style_agent,
                 "portrait": create_portrait_agent,
                 "story": create_story_agent,
             }
@@ -126,6 +128,53 @@ REMEMBER: Tool call stores data, text message asks for review."""
     )
 
 
+def create_style_agent():
+    """
+    Style Agent: Illustration style specialist.
+
+    Tools: present_style_options, escalate
+    Role: Propose style options and help user choose
+    """
+    model = get_gemini_model()
+
+    prompt = """You are an Illustration Style specialist.
+
+YOUR JOB:
+1. Analyze the enhanced story and characters
+2. Pick 3-4 illustration styles from the AVAILABLE CATALOG that best fit the story
+3. Present them to the user for selection
+4. Make sure everything is written in user's language
+
+AVAILABLE STYLE KEYS (provided in context message):
+The context message will list the available style keys from the catalog.
+Pick 3-4 keys that best match the story's tone and audience.
+
+YOUR TOOLS:
+- present_style_options(style_keys): Present style keys for user to choose (REQUIRED)
+- escalate: If user wants to change story direction
+
+WORKFLOW:
+1. Read the story, characters, and available style keys from conversation
+2. Think about which catalog styles best fit this story
+3. Call present_style_options with your chosen keys:
+   present_style_options(style_keys=["watercolor", "cartoon", "digital_painting"])
+4. After calling the tool, stream a brief text explaining why you picked these styles
+
+CRITICAL RULES:
+- ONLY use keys from the available catalog - do NOT invent new keys
+- Pick 3-4 styles that genuinely fit the story (don't just pick randomly)
+- You MUST call present_style_options - do not just describe styles in text
+- If user gives feedback, pick different keys and call present_style_options again
+- After calling the tool, output text explaining your choices in user's language"""
+
+    return create_react_agent(
+        model=model,
+        tools=STYLE_TOOLS,
+        name="style_agent",
+        prompt=prompt
+    )
+
+
 def create_portrait_agent():
     """
     Portrait Agent: Character portrait specialist.
@@ -154,7 +203,7 @@ WORKFLOW:
    generate_character_portrait(
        description=character["description"],
        character_name=character["name"],
-       character_index=character["index"]  
+       character_index=character["index"]
    )
 3. After all portraits are generated, output text to prompt user in their prefered language:
    "I've generated portraits for all X characters. Please review and approve to continue to story pages."
@@ -162,6 +211,7 @@ WORKFLOW:
 IMPORTANT:
 - ALWAYS pass character_index parameter when calling generate_character_portrait
 - The index comes from the character object (character["index"])
+- The illustration style is applied automatically - you do NOT need to pass it
 - Frontend sees portraits appear one by one as you create them (via state updates)
 - Each generate_character_portrait call updates state.characters[index] automatically
 - Keep track of image_ids for later use in story pages
@@ -198,13 +248,13 @@ YOUR TOOLS:
 BEFORE GENERATING:
 First discuss with the user:
 - How many pages you plan to create (typically 6-12)
-- The illustration style you'll use (watercolor, cartoon, realistic, etc.)
 - Brief overview of what each page will show
 
 Wait for user's confirmation before generating pages, if any issues, report to user.
 
 WHEN GENERATING:
 - Use character image_ids from conversation for visual consistency
+- The illustration style is applied automatically - you do NOT need to pass it
 - Call generate_page_image for each page in order with descriptive prompts
 
 USE USER'S LANGUAGE for all communication."""

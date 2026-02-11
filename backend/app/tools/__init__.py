@@ -5,7 +5,7 @@ Tool organization:
 - story_tools: generate_character_portrait, generate_page_image
 """
 
-from .hitl_tools import escalate, present_enhanced_story
+from .hitl_tools import escalate, present_enhanced_story, present_style_options
 from .story_tools import (
     generate_character_portrait,
     generate_page_image,
@@ -29,6 +29,12 @@ PORTRAIT_TOOLS = [
     escalate,
 ]
 
+# Style Agent: style selection
+STYLE_TOOLS = [
+    present_style_options,
+    escalate,
+]
+
 # Story Agent: page generation only (no save_storybook - pages saved to state automatically)
 STORY_TOOLS = [
     generate_page_image,
@@ -40,11 +46,13 @@ __all__ = [
     # HITL tools
     "escalate",
     "present_enhanced_story",
+    "present_style_options",
     # Functional tools
     "generate_character_portrait",
     "generate_page_image",
     # Tool sets
     "ENHANCE_TOOLS",
+    "STYLE_TOOLS",
     "PORTRAIT_TOOLS",
     "STORY_TOOLS",
 ]

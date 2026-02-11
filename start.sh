@@ -73,6 +73,10 @@ sleep 3
 # Start Frontend
 echo -e "${GREEN}Starting Frontend Server...${NC}"
 cd "$FRONTEND_DIR"
+if [ ! -d "node_modules" ]; then
+    echo -e "${YELLOW}Installing frontend dependencies...${NC}"
+    npm install
+fi
 npm run dev 2>&1 | sed "s/^/[${BLUE}FRONTEND${NC}] /" &
 FRONTEND_PID=$!
 
